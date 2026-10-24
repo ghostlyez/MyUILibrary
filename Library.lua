@@ -2,9 +2,10 @@
 --!nolint
 --[[
     ╔═══════════════════════════════════════════════════════════════╗
-    ║  Vesper UI Library                                  v2.0.0    ║
+    ║  Vesper UI Library                                  v1.00.0   ║
     ║  Single-file Roblox UI library · 1500+ built-in Lucide icons  ║
-    ║  Docs: see README.md                                          ║
+    ║  Made by wheizx · Discord: wheizx (loader)                    ║
+    ║  Docs: see README_VESPER.md                                   ║
     ╚═══════════════════════════════════════════════════════════════╝
 
     Icons: Lucide (ISC License) via latte-soft/lucide-roblox (MIT).
@@ -39,7 +40,7 @@ end
 -- ─────────────────────────────────────────────────────────────
 --  Namespaces (kept as tables to stay far below the local limit)
 -- ─────────────────────────────────────────────────────────────
-local Vesper   = { Version = "2.0.0", Windows = {}, Flags = {}, Debug = false }
+local Vesper   = { Version = "1.00.0", Author = "wheizx", Windows = {}, Flags = {}, Debug = false }
 local Util     = {}
 local Theme    = {}
 local Icons    = {}
@@ -51,6 +52,7 @@ local Config   = {}   -- config manager
 local Shadow   = {}   -- depth shadows
 local Lines    = {}   -- fading lines / dividers
 local Fx       = {}   -- click effects, backgrounds, loaders
+local Edge     = {}   -- corner-following strokes + contact shadows
 
 -- ─────────────────────────────────────────────────────────────
 --  Maid (connection / instance cleanup)
@@ -372,9 +374,10 @@ local SHADOW_LAYERS = {
 function Shadow.Apply(sh)
 	local cfg = Shadow.Config
 	local factor = Util.Clamp(cfg.Strength / 0.5, 0, 2)
+	local _, wantShadow = Edge.Wants("Surface", sh.Mode)
 	for i, def in SHADOW_LAYERS do
 		local layer = sh.Layers[i]
-		local on = cfg.Depth > 0 and (not def.soft or cfg.Soft)
+		local on = wantShadow and cfg.Depth > 0 and (not def.soft or cfg.Soft)
 		layer.Base = on and (1 - Util.Clamp((1 - def.base) * factor, 0, 1)) or 1
 		local e = def.expand
 		layer.Frame.Position = UDim2.new(0, -e, 0, -e + cfg.Depth + def.dy)
@@ -409,10 +412,6 @@ function Shadow.Fade(sh, a, time, ease, instant)
 	end
 end
 
-function Shadow.ApplyAll()
-	for sh in Shadow.Registry do pcall(Shadow.Apply, sh) end
-end
-
 --- Surface = transparent holder (position / size / scale live here) + shadow layers + CanvasGroup.
 --- props go on the holder. auto = true makes the surface grow with its content (dialogs, notifications).
 function Util.Surface(parent, props, radius, auto)
@@ -427,6 +426,10 @@ function Util.Surface(parent, props, radius, auto)
 	})
 	Util.Corner(canvas, radius)
 	Util.SetPart(canvas, "Shadow", shadow)
+	-- the stroke lives next to the canvas (never inside it) and fades together with it
+	local edge = Edge.Attach(holder, "Surface", { Radius = radius, ZIndex = 3, Contact = false, Alpha = 0.6 })
+	Edge.Fade(edge, 1, 0, nil, true)
+	Util.SetPart(canvas, "Edge", edge)
 	return holder, canvas, shadow
 end
 
@@ -439,6 +442,14 @@ function Util.FadeCanvas(canvas, a, time, ease, instant)
 	end
 	local sh = Util.Part(canvas, "Shadow")
 	if sh then Shadow.Fade(sh, a, time, ease, instant) end
+	local edge = Util.Part(canvas, "Edge")
+	if edge then Edge.Fade(edge, a, time, ease, instant) end
+	local extras = Util.Part(canvas, "Extras")
+	if extras then
+		for _, extra in extras do
+			if instant then extra.GroupTransparency = a else Util.Tween(extra, time, { GroupTransparency = a }, ease) end
+		end
+	end
 end
 
 -- ─────────────────────────────────────────────────────────────
@@ -509,17 +520,21 @@ end
 --  Contact shadow (the "2 pixel" depth under cards and buttons) + soft shading
 -- ─────────────────────────────────────────────────────────────
 Shadow.Edges = setmetatable({}, { __mode = "k" })
+Shadow.EdgeInfo = setmetatable({}, { __mode = "k" })   -- frame -> { Kind, Mode }
 
 function Shadow.ApplyEdge(f)
 	local base = Shadow.Edges[f]
 	if not base then return end
 	local cfg = Shadow.Config
+	local info = Shadow.EdgeInfo[f]
+	local _, wantShadow = Edge.Wants(info and info.Kind or "Card", info and info.Mode)
 	local factor = Util.Clamp(cfg.Strength / 0.5, 0, 2)
-	f.BackgroundTransparency = cfg.Depth > 0 and (1 - Util.Clamp((1 - base) * factor, 0, 1)) or 1
+	f.Visible = wantShadow and cfg.Depth > 0
+	f.BackgroundTransparency = (cfg.Depth > 0) and (1 - Util.Clamp((1 - base) * factor, 0, 1)) or 1
 	f.Size = UDim2.new(1, -(f:GetAttribute("Inset") or 5) * 2, 0, math.max(cfg.Depth, 1) + 1)
 end
 
---- Thin shadow just below `parent`'s bottom edge. o = { Inset, Alpha (0-1 transparency at strength 0.5), Color }
+--- Thin shadow just below `parent`'s bottom edge. o = { Inset, Alpha (0-1 transparency at strength 0.5), Color, Kind, Mode }
 function Shadow.Edge(parent, o)
 	o = o or {}
 	local inset = o.Inset or 5
@@ -531,6 +546,7 @@ function Shadow.Edge(parent, o)
 	Util.Corner(f, 2)
 	New("UIGradient", { Transparency = NumberSequence.new({ kp(0, 1), kp(0.12, 0), kp(0.88, 0), kp(1, 1) }), Parent = f })
 	Shadow.Edges[f] = o.Alpha or 0.8
+	Shadow.EdgeInfo[f] = { Kind = o.Kind or "Card", Mode = o.Mode }
 	Shadow.ApplyEdge(f)
 	return f
 end
@@ -562,6 +578,9 @@ Theme.Listeners      = {}
 Theme.Watchers       = {}  -- inst -> fn(name, theme, inst)   (removed automatically when inst is destroyed)
 Theme.StyleWatchers  = {}  -- inst -> fn(style, inst)
 Theme.Styles         = { "Plain", "Orbs", "Streaks", "Aurora", "Stars", "Grid", "Shards", "Rings" }
+Theme.Specs          = {}      -- name -> { Spec, Compact }  (the source every mode is built from)
+Theme.Mode           = "Dark"  -- "Dark" | "Light": one switch for every theme
+Theme.ModeExplicit   = false   -- true once the user (or the script) chose a mode on purpose
 Theme.StyleOverride  = nil
 Theme.Animated       = true
 
@@ -570,49 +589,67 @@ local function rgb(r, g, b) return Color3.fromRGB(r, g, b) end
 local STATUS_DARK  = { Success = rgb(74, 222, 128),  Warning = rgb(251, 191, 36), Danger = rgb(248, 90, 90),  Info = rgb(96, 165, 250) }
 local STATUS_LIGHT = { Success = rgb(22, 163, 74),   Warning = rgb(217, 119, 6),  Danger = rgb(220, 38, 38),  Info = rgb(37, 99, 235) }
 
---- Build a full token set from a compact spec.
---- spec = { Mode = "Dark"|"Light", Base = Color3, Accent = Color3, Accent2 = Color3?, Style = string?, Override = {token = value}? }
-function Theme.Make(name, spec)
-	local dark = spec.Mode ~= "Light"
-	local base = spec.Base
-	local accent = spec.Accent
-	local accent2 = spec.Accent2 or accent
+--- Keep an accent readable on the surface it sits on, in either mode
+local function fitAccent(c, dark)
+	local lum = Util.Luminance(c)
+	if dark then
+		if lum < 0.30 then return c:Lerp(WHITE, math.min((0.30 - lum) * 1.7, 0.5)) end
+	elseif lum > 0.50 then
+		return c:Lerp(BLACK, math.min((lum - 0.50) * 1.2, 0.5))
+	end
+	return c
+end
+
+--- Build a full token set from a compact spec, for one mode.
+--- spec = { Base = Color3?, Accent = Color3, Accent2 = Color3?, Style = string?, Override = {token = value}? }
+--- A theme is a colour, not a mode: the same spec produces a Dark and a Light palette, and every surface
+--- (window, sidebar, cards, inputs, popups, lines) is tinted by the theme's own colour in both.
+function Theme.Make(name, spec, mode)
+	mode = mode or Theme.Mode
+	local dark = mode ~= "Light"
+	local accent = fitAccent(spec.Accent, dark)
+	local accent2 = fitAccent(spec.Accent2 or spec.Accent, dark)
+	local base = spec.Base or spec.Accent:Lerp(BLACK, 0.88)
 	local t = { Name = name, Mode = dark and "Dark" or "Light", Accent = accent, Accent2 = accent2, Style = spec.Style or "Plain" }
 
 	if dark then
-		-- three-stop window gradient: lit corner -> accent-tinted middle -> deep tinted end
-		t.Window     = base:Lerp(WHITE, 0.012)
-		t.Window2    = base:Lerp(accent, 0.13)
-		t.Window3    = base:Lerp(accent2, 0.10):Lerp(BLACK, 0.25)
-		t.Sidebar    = base:Lerp(BLACK, 0.30)
-		t.Sidebar2   = t.Sidebar:Lerp(accent, 0.12)
-		t.Surface    = base:Lerp(WHITE, 0.028)
-		t.Card       = base:Lerp(WHITE, 0.062)
-		t.CardHover  = base:Lerp(WHITE, 0.105)
-		t.Input      = base:Lerp(WHITE, 0.125)
-		t.InputHover = base:Lerp(WHITE, 0.175)
-		t.Stroke     = base:Lerp(WHITE, 0.34)
-		t.Popup      = base:Lerp(WHITE, 0.085)
-		t.Text       = base:Lerp(WHITE, 0.94)
-		t.SubText    = base:Lerp(WHITE, 0.58)
-		t.Muted      = base:Lerp(WHITE, 0.38)
+		-- a legacy light base is not usable as a dark one: derive it from the accent instead
+		if Util.Luminance(base) > 0.45 then base = spec.Accent:Lerp(BLACK, 0.88) end
+		local b = base:Lerp(accent, 0.10)
+		t.Window     = b:Lerp(WHITE, 0.055)
+		t.Window2    = b:Lerp(accent, 0.20):Lerp(WHITE, 0.035)
+		t.Window3    = b:Lerp(accent2, 0.15):Lerp(BLACK, 0.10)
+		t.Sidebar    = b:Lerp(BLACK, 0.16)
+		t.Sidebar2   = t.Sidebar:Lerp(accent, 0.16)
+		t.Surface    = b:Lerp(WHITE, 0.075)
+		t.Card       = b:Lerp(WHITE, 0.12)
+		t.CardHover  = b:Lerp(WHITE, 0.175)
+		t.Input      = b:Lerp(WHITE, 0.20)
+		t.InputHover = b:Lerp(WHITE, 0.26)
+		t.Stroke     = b:Lerp(WHITE, 0.66)
+		t.Popup      = b:Lerp(WHITE, 0.13)
+		t.Text       = b:Lerp(WHITE, 0.96)
+		t.SubText    = b:Lerp(WHITE, 0.74)
+		t.Muted      = b:Lerp(WHITE, 0.54)
 		for k, v in STATUS_DARK do t[k] = v end
 	else
-		t.Window     = base:Lerp(WHITE, 0.30)
-		t.Window2    = base:Lerp(accent, 0.16):Lerp(WHITE, 0.15)
-		t.Window3    = base:Lerp(accent2, 0.20):Lerp(BLACK, 0.03)
-		t.Sidebar    = base:Lerp(BLACK, 0.05)
+		-- a pale wash of the theme's own colour
+		local b = base:Lerp(accent, 0.24):Lerp(WHITE, 0.90)
+		t.Window     = b:Lerp(WHITE, 0.35)
+		t.Window2    = b:Lerp(accent, 0.10):Lerp(WHITE, 0.20)
+		t.Window3    = b:Lerp(accent2, 0.17)
+		t.Sidebar    = b:Lerp(BLACK, 0.045):Lerp(accent, 0.05)
 		t.Sidebar2   = t.Sidebar:Lerp(accent, 0.10)
-		t.Surface    = base:Lerp(BLACK, 0.04)
-		t.Card       = base:Lerp(WHITE, 0.78)
-		t.CardHover  = base:Lerp(WHITE, 0.50)
-		t.Input      = base:Lerp(BLACK, 0.075)
-		t.InputHover = base:Lerp(BLACK, 0.115)
-		t.Stroke     = base:Lerp(BLACK, 0.34)
-		t.Popup      = base:Lerp(WHITE, 0.92)
-		t.Text       = base:Lerp(BLACK, 0.88)
-		t.SubText    = base:Lerp(BLACK, 0.52)
-		t.Muted      = base:Lerp(BLACK, 0.38)
+		t.Surface    = b:Lerp(BLACK, 0.025)
+		t.Card       = b:Lerp(WHITE, 0.72)
+		t.CardHover  = b:Lerp(WHITE, 0.48)
+		t.Input      = b:Lerp(BLACK, 0.07)
+		t.InputHover = b:Lerp(BLACK, 0.11)
+		t.Stroke     = b:Lerp(BLACK, 0.50)
+		t.Popup      = b:Lerp(WHITE, 0.90)
+		t.Text       = b:Lerp(BLACK, 0.90)
+		t.SubText    = b:Lerp(BLACK, 0.62)
+		t.Muted      = b:Lerp(BLACK, 0.45)
 		for k, v in STATUS_LIGHT do t[k] = v end
 	end
 
@@ -626,34 +663,37 @@ function Theme.Make(name, spec)
 	return t
 end
 
---- Register a theme. Pass either a compact spec (has `Base`) or a partial token table with `Extends`.
-function Theme.Add(name, spec)
-	local theme
-	if spec.Base then
-		theme = Theme.Make(name, spec)
-	else
-		local parent = Theme.Themes[spec.Extends or "Vesper"] or Theme.Themes.Vesper
-		theme = { Name = name }
-		for k, v in parent do theme[k] = v end
-		for k, v in spec do
-			if k ~= "Extends" then theme[k] = v end
-		end
-		theme.Name = name
-		if spec.Accent and spec.Accent2 == nil then theme.Accent2 = spec.Accent end
-		if spec.Accent and spec.AccentText == nil then
-			local a = spec.Accent
-			local lum = 0.2126 * a.R + 0.7152 * a.G + 0.0722 * a.B
-			theme.AccentText = lum > 0.62 and Color3.fromRGB(18, 18, 22) or Color3.fromRGB(255, 255, 255)
-		end
+--- Rebuild one theme's tokens for the current mode
+function Theme.Build(name)
+	local def = Theme.Specs[name]
+	local spec = def.Spec
+	if def.Compact then return Theme.Make(name, spec, Theme.Mode) end
+	local parent = Theme.Themes[spec.Extends or "Vesper"] or Theme.Themes.Vesper
+	local theme = { Name = name }
+	for k, v in parent do theme[k] = v end
+	for k, v in spec do
+		if k ~= "Extends" then theme[k] = v end
 	end
-	if not Theme.Themes[name] then table.insert(Theme.Order, name) end
-	Theme.Themes[name] = theme
-	if Theme.Current and Theme.Current.Name == name and Theme.Set then Theme.Set(name, true) end
+	theme.Name = name
+	if spec.Accent and spec.Accent2 == nil then theme.Accent2 = spec.Accent end
+	if spec.Accent and spec.AccentText == nil then
+		local a = spec.Accent
+		local lum = 0.2126 * a.R + 0.7152 * a.G + 0.0722 * a.B
+		theme.AccentText = lum > 0.62 and Color3.fromRGB(18, 18, 22) or Color3.fromRGB(255, 255, 255)
+	end
 	return theme
 end
 
--- ── Built-in themes ──────────────────────────────────────────
--- Dark
+--- Register a theme. Pass a compact spec (has `Accent`) or a partial token table with `Extends`.
+function Theme.Add(name, spec)
+	Theme.Specs[name] = { Spec = spec, Compact = spec.Accent ~= nil and spec.Extends == nil }
+	if not Theme.Themes[name] then table.insert(Theme.Order, name) end
+	Theme.Themes[name] = Theme.Build(name)
+	if Theme.Current and Theme.Current.Name == name and Theme.Set then Theme.Set(name, true) end
+	return Theme.Themes[name]
+end
+
+-- ── Built-in themes (each one works in Dark and in Light) ───────
 Theme.Add("Vesper",     { Base = rgb(17, 18, 27),  Accent = rgb(124, 92, 255),  Accent2 = rgb(56, 189, 248),  Style = "Orbs" })
 Theme.Add("Midnight",   { Base = rgb(11, 16, 29),  Accent = rgb(59, 130, 246),  Accent2 = rgb(34, 211, 238),  Style = "Stars" })
 Theme.Add("Obsidian",   { Base = rgb(14, 14, 17),  Accent = rgb(226, 232, 240), Accent2 = rgb(148, 163, 184), Style = "Shards" })
@@ -678,13 +718,13 @@ Theme.Add("Inferno",    { Base = rgb(20, 9, 9),    Accent = rgb(248, 113, 53),  
 Theme.Add("Glacier",    { Base = rgb(9, 17, 26),   Accent = rgb(125, 211, 252), Accent2 = rgb(165, 180, 252), Style = "Rings" })
 Theme.Add("Matrix",     { Base = rgb(6, 14, 9),    Accent = rgb(34, 197, 94),   Accent2 = rgb(132, 204, 22),  Style = "Grid" })
 Theme.Add("Twilight",   { Base = rgb(14, 15, 32),  Accent = rgb(99, 102, 241),  Accent2 = rgb(45, 212, 191),  Style = "Aurora" })
--- Light
-Theme.Add("Paper",      { Mode = "Light", Base = rgb(219, 219, 222), Accent = rgb(58, 58, 66),   Accent2 = rgb(112, 112, 124), Style = "Shards" })
-Theme.Add("Daylight",   { Mode = "Light", Base = rgb(226, 229, 246), Accent = rgb(99, 102, 241),  Accent2 = rgb(14, 165, 233),  Style = "Orbs" })
-Theme.Add("Blossom",    { Mode = "Light", Base = rgb(235, 222, 238), Accent = rgb(217, 70, 239),  Accent2 = rgb(244, 114, 182), Style = "Orbs" })
-Theme.Add("Latte",      { Mode = "Light", Base = rgb(232, 234, 241), Accent = rgb(136, 57, 239),  Accent2 = rgb(30, 102, 245),  Style = "Aurora" })
-Theme.Add("Mint",       { Mode = "Light", Base = rgb(220, 238, 231), Accent = rgb(16, 185, 129),  Accent2 = rgb(45, 212, 191),  Style = "Streaks" })
-Theme.Add("Sand",       { Mode = "Light", Base = rgb(239, 230, 217), Accent = rgb(217, 119, 6),   Accent2 = rgb(234, 88, 12),   Style = "Orbs" })
+-- these six used to be light-only themes; they are plain colour themes now
+Theme.Add("Paper",      { Mode = "Light", Base = rgb(24, 24, 27), Accent = rgb(58, 58, 66),   Accent2 = rgb(112, 112, 124), Style = "Shards" })
+Theme.Add("Daylight",   { Mode = "Light", Base = rgb(17, 18, 36), Accent = rgb(99, 102, 241),  Accent2 = rgb(14, 165, 233),  Style = "Orbs" })
+Theme.Add("Blossom",    { Mode = "Light", Base = rgb(30, 16, 34), Accent = rgb(217, 70, 239),  Accent2 = rgb(244, 114, 182), Style = "Orbs" })
+Theme.Add("Latte",      { Mode = "Light", Base = rgb(22, 17, 34), Accent = rgb(136, 57, 239),  Accent2 = rgb(30, 102, 245),  Style = "Aurora" })
+Theme.Add("Mint",       { Mode = "Light", Base = rgb(12, 26, 22), Accent = rgb(16, 185, 129),  Accent2 = rgb(45, 212, 191),  Style = "Streaks" })
+Theme.Add("Sand",       { Mode = "Light", Base = rgb(28, 22, 14), Accent = rgb(217, 119, 6),   Accent2 = rgb(234, 88, 12),   Style = "Orbs" })
 
 Theme.Current = Theme.Themes.Vesper
 
@@ -785,6 +825,22 @@ function Theme.Set(name, silent)
 	return true
 end
 
+--- "Dark" | "Light". Every theme has both; the colour stays, the surfaces change.
+function Theme.SetMode(mode, silent)
+	mode = (type(mode) == "string" and string.lower(mode) == "light") and "Light" or "Dark"
+	Theme.ModeExplicit = true
+	if Theme.Mode == mode then return true end
+	Theme.Mode = mode
+	local currentName = Theme.Current.Name
+	for _, name in Theme.Order do Theme.Themes[name] = Theme.Build(name) end
+	Theme.Current = Theme.Themes[currentName] or Theme.Themes.Vesper
+	Theme.Refresh(not silent)
+	for _, fn in Theme.Listeners do Util.Fire(fn, Theme.Current.Name, Theme.Current) end
+	for inst, fn in Theme.Watchers do pcall(fn, Theme.Current.Name, Theme.Current, inst) end
+	Theme.FireStyle()
+	return true
+end
+
 --- nil / "Default" follows the theme's own style
 function Theme.SetStyle(style)
 	if style == "Default" or style == "Theme" or style == "" then style = nil end
@@ -805,6 +861,185 @@ end
 function Theme.Swatch(name)
 	local t = Theme.Themes[name]
 	return t.Accent, t.Accent2, t.Window
+end
+
+-- ─────────────────────────────────────────────────────────────
+--  Edge: strokes that follow the rounded corners and fade out before they meet,
+--  plus the 2px contact shadow. A surface can use either one, or both.
+--
+--  Vesper:SetEdge({ Mode, Style, Thickness, Strength })
+--    Mode      "Auto" (each kind of surface picks what suits it) | "Stroke" | "Shadow" | "Both" | "None"
+--    Style     "Corners" (top-left + bottom-right, fading before they touch) | "Diagonal" | "Top" | "Full"
+--
+--  A stroke is a transparent frame with a UIStroke whose UIGradient fades it out along
+--  the edge, so it hugs the corner radius and never draws a straight line across a corner.
+--  It is never placed on a CanvasGroup (the engine does not fade those with the group);
+--  surfaces get theirs next to the canvas and it fades with it.
+-- ─────────────────────────────────────────────────────────────
+Edge.Mode      = "Auto"
+Edge.Style     = "Corners"
+Edge.Thickness = 1
+Edge.Strength  = 0.5      -- 0.5 = as designed, 0 hides every stroke
+Edge.Registry  = setmetatable({}, { __mode = "k" })
+Edge.Kinds     = {        -- what "Auto" means for each kind of surface
+	Surface = "Both", Card = "Both", Primary = "Both", Tip = "Both",
+	Button = "Stroke", Chip = "Stroke", Input = "Stroke", Tab = "Stroke",
+}
+Edge.Styles = { "Corners", "Diagonal", "Top", "Full" }
+Edge.Modes  = { "Auto", "Stroke", "Shadow", "Both", "None" }
+
+local EDGE_ROT = { Corners = 45, Diagonal = 45, Top = 90, Full = 0 }
+
+--- Returns (strokeOn, shadowOn) for a kind of surface. `override` is a per-element Mode.
+function Edge.Wants(kind, override)
+	local m = override or Edge.Mode
+	if m == "Auto" or m == nil then m = Edge.Kinds[kind or "Card"] or "Both" end
+	if m == "Both" then return true, true end
+	if m == "Stroke" then return true, false end
+	if m == "Shadow" then return false, true end
+	return false, false
+end
+
+--- Transparency profile along the stroke. `alpha` = opacity at the brightest point (0-1).
+function Edge.Sequence(style, alpha, fade)
+	local tr = 1 - Util.Clamp(alpha, 0, 1)
+	fade = Util.Clamp(fade or 0.3, 0.06, 0.46)
+	if style == "Full" then
+		return NumberSequence.new(tr)
+	elseif style == "Top" then
+		return NumberSequence.new({ kp(0, tr), kp(math.min(fade * 1.35, 0.9), 1), kp(1, 1) })
+	elseif style == "Diagonal" then
+		return NumberSequence.new({ kp(0, tr), kp(math.min(fade * 1.7, 0.9), 1), kp(1, 1) })
+	end
+	-- Corners: bright at the top-left, a softer echo at the bottom-right, nothing in between
+	return NumberSequence.new({ kp(0, tr), kp(fade, 1), kp(1 - fade, 1), kp(1, 1 - (1 - tr) * 0.55) })
+end
+
+local function readRadius(host)
+	local c = host:FindFirstChildOfClass("UICorner")
+	return c and c.CornerRadius or UDim.new(0, 8)
+end
+
+function Edge.Apply(h)
+	local frame = h.Frame
+	if not frame or not frame.Parent then return end
+	local wantStroke = Edge.Wants(h.Kind, h.Mode)
+	local th = h.Thickness or Edge.Thickness
+	frame.Visible = wantStroke and Edge.Strength > 0
+	frame.Position = UDim2.fromOffset(th, th)
+	frame.Size = UDim2.new(1, -th * 2, 1, -th * 2)
+	h.Corner.CornerRadius = UDim.new(h.Radius.Scale, math.max(h.Radius.Offset - th, 0))
+	h.Stroke.Thickness = th * (1 + 0.5 * (h.Level or 0))
+	local style = h.Style or Edge.Style
+	local peak = Util.Clamp((h.Alpha or 0.5) * (Edge.Strength / 0.5), 0, 1)
+	h.Grad.Rotation = h.Rotation or EDGE_ROT[style] or 45
+	h.Grad.Transparency = Edge.Sequence(style, peak, h.Fade)
+end
+
+function Edge.ApplyAll()
+	for h in Edge.Registry do pcall(Edge.Apply, h) end
+	Shadow.ApplyAll()
+end
+
+--- Put a corner stroke (and, unless Contact = false, a contact shadow) on `host`.
+--- kind: "Surface" | "Card" | "Primary" | "Button" | "Chip" | "Input" | "Tab" | "Tip"
+--- o = { Radius (px or UDim, default the host's UICorner), Thickness, Alpha (0-1), Fade (0.06-0.46), Style,
+---       Token ("Stroke" | "Accent" | function(theme)), Mode, ZIndex, Contact (false = no shadow),
+---       Inset / ShadowAlpha (contact shadow), Rotation }
+function Edge.Attach(host, kind, o)
+	o = o or {}
+	local radius = o.Radius
+	if type(radius) == "number" then radius = UDim.new(0, radius) end
+	radius = radius or readRadius(host)
+
+	local h = { Kind = kind or "Card", Mode = o.Mode, Radius = radius, Thickness = o.Thickness, Alpha = o.Alpha or 0.5, Fade = o.Fade,
+		Style = o.Style, Rotation = o.Rotation, Token = o.Token or "Stroke", Level = 0, Rest = 0 }
+	h.Frame = New("Frame", {
+		Name = "Edge", BackgroundTransparency = 1, Active = false, ZIndex = o.ZIndex or 5, Size = UDim2.fromScale(1, 1), Parent = host,
+	})
+	h.Corner = Util.Corner(h.Frame, 8)
+	h.Stroke = New("UIStroke", { Thickness = 1, Color = WHITE, Transparency = 0, ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Parent = h.Frame })
+	h.Grad = New("UIGradient", { Parent = h.Stroke })
+	h.Color = function(t)
+		local c = type(h.Token) == "function" and h.Token(t) or t[h.Token] or t.Stroke
+		if h.Level > 0 then c = c:Lerp(t.Accent, math.min(h.Level, 1) * 0.75) end
+		return c
+	end
+	Theme.Bind(h.Stroke, { Color = h.Color })
+	if o.Contact ~= false then
+		h.Contact = Shadow.Edge(host, { Inset = o.Inset or 6, Alpha = o.ShadowAlpha or 0.8, Kind = h.Kind, Mode = o.Mode })
+	end
+	Edge.Registry[h] = true
+	Edge.Apply(h)
+	Util.SetPart(host, "Edge", h)
+	return h
+end
+
+--- Move the stroke between "resting" (0) and "lit" (1): it warms toward the accent and thickens a little.
+function Edge.Level(h, level, time)
+	if not h or not h.Stroke or not h.Stroke.Parent then return end
+	h.Level = level
+	local th = h.Thickness or Edge.Thickness
+	if time and time > 0 then
+		Util.Tween(h.Stroke, time, { Color = h.Color(Theme.Current), Thickness = th * (1 + 0.5 * level) }, "Quad")
+	else
+		h.Stroke.Color = h.Color(Theme.Current)
+		h.Stroke.Thickness = th * (1 + 0.5 * level)
+	end
+end
+
+--- Resting level (what the stroke returns to after a hover or a pulse)
+function Edge.SetRest(h, level, time)
+	if not h then return end
+	h.Rest = level
+	Edge.Level(h, level, time or 0.2)
+end
+
+--- A quick flash used by click effects
+function Edge.Pulse(h)
+	if not h or not h.Stroke or not h.Stroke.Parent then return end
+	Edge.Level(h, 1, 0.07)
+	task.delay(0.1, function()
+		if h.Stroke.Parent then Edge.Level(h, h.Rest or 0, 0.5) end
+	end)
+end
+
+--- a = transparency of the surface the stroke belongs to (0 visible, 1 gone)
+function Edge.Fade(h, a, time, ease, instant)
+	if not h or not h.Stroke then return end
+	if instant or not time then
+		h.Stroke.Transparency = a
+	else
+		Util.Tween(h.Stroke, time, { Transparency = a }, ease)
+	end
+end
+
+function Edge.SetToken(h, token)
+	if not h then return end
+	h.Token = token
+	Theme.Bind(h.Stroke, { Color = h.Color })
+end
+
+--- Vesper:SetEdge({ Mode, Style, Thickness, Strength })
+function Edge.Set(opts)
+	opts = opts or {}
+	if opts.Mode ~= nil and table.find(Edge.Modes, opts.Mode) then Edge.Mode = opts.Mode end
+	if opts.Style ~= nil and table.find(Edge.Styles, opts.Style) then Edge.Style = opts.Style end
+	if opts.Thickness ~= nil then Edge.Thickness = Util.Clamp(tonumber(opts.Thickness) or 1, 0.5, 4) end
+	if opts.Strength ~= nil then Edge.Strength = Util.Clamp(tonumber(opts.Strength) or 0.5, 0, 1) end
+	Edge.ApplyAll()
+end
+
+--- Press feedback: the surface squeezes a little and springs back. UIScale never changes layout.
+function Util.PressScale(btn, target, amount, rest)
+	target = target or btn
+	local sc = target:FindFirstChild("PressScale") or New("UIScale", { Name = "PressScale", Parent = target })
+	amount = amount or 0.97
+	btn.MouseButton1Down:Connect(function() Util.Tween(sc, 0.1, { Scale = amount }, "Quad") end)
+	local function up() Util.Tween(sc, 0.4, { Scale = rest or 1 }, "Back") end
+	btn.MouseButton1Up:Connect(up)
+	btn.MouseLeave:Connect(up)
+	return sc
 end
 -- GENERATED by tools/build.py from latte-soft/lucide-roblox (Lucide v0.363.0). Do not edit.
 local ICON_DATA = {
@@ -863,16 +1098,93 @@ end
 
 function Icons.Has(name) return parseIcons(48)[cleanName(name)] ~= nil end
 
---- Resolve any icon input to { Image, RectSize, RectOffset, Lucide }
---- Accepts: lucide name ("home" / "lucide:home"), "rbxassetid://id", a number id, or a ready table.
+-- ── Your own images (PNG / JPG / WEBP) ───────────────────────
+-- An icon can be a picture instead of a Lucide name:
+--   "rbxassetid://123"  or  123          an image you uploaded to Roblox
+--   "rbxthumb://..."                     a Roblox thumbnail url
+--   "logo.png"  /  "MyHub/logo.png"      a file in the executor's workspace folder (needs getcustomasset)
+--   "https://site/logo.png"              downloaded once into <workspace>/Vesper/cache, then loaded from there
+local IMAGE_EXT = { png = true, jpg = true, jpeg = true, webp = true, gif = true, bmp = true }
+local fetchCache, fetching, fileWarned = {}, {}, {}
+
+local function hashOf(text)
+	local h = 5381
+	for i = 1, #text do h = (h * 33 + string.byte(text, i)) % 4294967296 end
+	return string.format("%08x", h)
+end
+
+--- Load a local image file as a Roblox asset (nil when the executor cannot)
+function Icons.FromFile(path)
+	if not (getcustomasset and isfile) then
+		if not fileWarned.api then fileWarned.api = true; warn("[Vesper] This executor cannot load image files (getcustomasset is missing)") end
+		return nil
+	end
+	local okFile, exists = pcall(isfile, path)
+	if not (okFile and exists) then
+		if not fileWarned[path] then fileWarned[path] = true; warn(("[Vesper] Image file '%s' was not found in the workspace folder"):format(path)) end
+		return nil
+	end
+	local ok, asset = pcall(getcustomasset, path)
+	return ok and asset or nil
+end
+
+--- Download an image url once and return a loadable asset (yields; call it from a task)
+function Icons.Fetch(url)
+	local cached = fetchCache[url]
+	if cached ~= nil then return cached or nil end
+	while fetching[url] do task.wait(0.05) end
+	if fetchCache[url] ~= nil then return fetchCache[url] or nil end
+	fetching[url] = true
+	local result = false
+	if writefile and getcustomasset then
+		local ok, body = pcall(function()
+			if request then
+				local r = request({ Url = url, Method = "GET" })
+				if r and (r.StatusCode == 200 or r.Success) then return r.Body end
+			end
+			return game:HttpGet(url)
+		end)
+		if ok and type(body) == "string" and #body > 16 then
+			if makefolder then
+				pcall(makefolder, "Vesper")
+				pcall(makefolder, "Vesper/cache")
+			end
+			local ext = string.match(string.lower(url), "%.(%w+)[%?#]?[^%.]*$")
+			local path = "Vesper/cache/" .. hashOf(url) .. "." .. (IMAGE_EXT[ext or ""] and ext or "png")
+			if pcall(writefile, path, body) then
+				local ok2, asset = pcall(getcustomasset, path)
+				if ok2 and asset then result = asset end
+			end
+		end
+	else
+		warn("[Vesper] This executor cannot download images (writefile / getcustomasset is missing)")
+	end
+	fetchCache[url] = result
+	fetching[url] = nil
+	return result or nil
+end
+
+--- Resolve any icon input to { Image, RectSize, RectOffset, Lucide, Pending }
+--- Accepts: lucide name ("home" / "lucide:home"), "rbxassetid://id", a number id, an image file name, an image url, or a ready table.
+--- `Pending` (when present) is a function that yields and returns the real asset (file / download).
 function Icons.Resolve(icon, px)
 	local kind = typeof(icon)
 	if icon == nil or icon == "" then return nil end
 	if kind == "number" then return { Image = "rbxassetid://" .. icon } end
 	if kind == "table" then return icon end
 	if kind ~= "string" then return nil end
-	if string.find(icon, "^rbxassetid://") or string.find(icon, "^rbxasset://") or string.find(icon, "^http") then
+	if string.find(icon, "^rbxassetid://") or string.find(icon, "^rbxasset://") or string.find(icon, "^rbxthumb://") or string.find(icon, "^rbxhttp://") then
 		return { Image = icon }
+	end
+	if string.find(icon, "^https?://") then
+		return { Image = "", Pending = function() return Icons.Fetch(icon) end }
+	end
+	do
+		local path = string.gsub(icon, "^file:", "")
+		local ext = string.match(string.lower(path), "%.(%w+)$")
+		if ext and IMAGE_EXT[ext] then
+			return { Image = "", Pending = function() return Icons.FromFile(path) end }
+		end
 	end
 	local name = cleanName(icon)
 	local size = (px and px > 48) and 256 or 48
@@ -902,6 +1214,22 @@ function Icons.Apply(img, icon, px, color)
 	end
 	img.Image = data.Image
 	img.ImageTransparency = 0
+	if data.Pending then
+		-- a file or a download: show nothing until it is ready, then swap it in (never blocks the caller)
+		local token = {}
+		Util.SetPart(img, "ImageToken", token)
+		img.ImageColor3 = WHITE
+		img.ImageRectSize = Vector2.zero
+		img.ImageRectOffset = Vector2.zero
+		task.spawn(function()
+			local ok, asset = pcall(data.Pending)
+			if ok and asset and img.Parent and Util.Part(img, "ImageToken") == token then
+				img.Image = asset
+				img.ImageTransparency = 0
+			end
+		end)
+		return true
+	end
 	if data.RectSize then
 		img.ImageRectSize = data.RectSize
 		img.ImageRectOffset = data.RectOffset
@@ -1013,40 +1341,83 @@ local function pointerIn(target)
 end
 Fx.PointerIn = pointerIn
 
---- Temporary rounded clip (ClipsDescendants ignores UICorner, a CanvasGroup does not).
---- Compensates for a UIPadding on the target. Do not use on frames that own a list layout.
-function Fx.Clip(target, radius)
-	local clip = New("CanvasGroup", {
-		Name = "FxClip", BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1), ZIndex = 0, Active = false, Parent = target,
-	})
-	New("UICorner", { CornerRadius = radius or cornerOf(target), Parent = clip })
+local function ownsLayout(inst)
+	for _, c in inst:GetChildren() do
+		if c:IsA("UIListLayout") or c:IsA("UIGridLayout") or c:IsA("UITableLayout") or c:IsA("UIPageLayout") then return true end
+	end
+	return false
+end
+
+--- A container for a temporary effect that can never push the target's layout around.
+--- Anything parented INTO an automatically sized frame (or one that owns a list layout) takes part in
+--- its size, which is what used to make a clicked row grow downwards. So:
+---   * a plain target        -> the effect sits inside it, sized with scale
+---   * an auto-sized target  -> the effect sits inside it with a fixed pixel size (same as the target)
+---   * a padded auto target, or one that owns a layout -> the effect floats above it from the gui root
+--- Returns the container and a function that destroys it.
+function Fx.Host(target, o)
+	o = o or {}
+	local rounded = o.Clip ~= false
+	local class = rounded and "CanvasGroup" or "Frame"
+	local radius = o.Radius or cornerOf(target)
+	local auto = target.AutomaticSize ~= Enum.AutomaticSize.None
+	local layout = ownsLayout(target)
 	local pad = target:FindFirstChildOfClass("UIPadding")
-	if pad then
-		local l, t = pad.PaddingLeft.Offset, pad.PaddingTop.Offset
-		clip.Position = UDim2.fromOffset(-l, -t)
-		clip.Size = UDim2.new(1, l + pad.PaddingRight.Offset, 1, t + pad.PaddingBottom.Offset)
+
+	local clip = New(class, { Name = "FxClip", BackgroundTransparency = 1, ZIndex = 0, Active = false })
+	if rounded then New("UICorner", { CornerRadius = radius, Parent = clip }) end
+
+	if not auto and not layout then
+		clip.Size = UDim2.fromScale(1, 1)
+		if pad then
+			local l, t = pad.PaddingLeft.Offset, pad.PaddingTop.Offset
+			clip.Position = UDim2.fromOffset(-l, -t)
+			clip.Size = UDim2.new(1, l + pad.PaddingRight.Offset, 1, t + pad.PaddingBottom.Offset)
+		end
+		clip.Parent = target
+	elseif auto and not layout and not pad then
+		local scale = Util.GetScale(target)
+		clip.Size = UDim2.fromOffset(target.AbsoluteSize.X / scale, target.AbsoluteSize.Y / scale)
+		clip.Parent = target
+	else
+		local gui = target:FindFirstAncestorOfClass("ScreenGui")
+		local root = gui and gui:FindFirstChild("Root")
+		if not root then clip:Destroy(); return nil end
+		local scale = Util.GetScale(target)
+		local rel = (target.AbsolutePosition - root.AbsolutePosition) / scale
+		clip.Position = UDim2.fromOffset(rel.X, rel.Y)
+		clip.Size = UDim2.fromOffset(target.AbsoluteSize.X / scale, target.AbsoluteSize.Y / scale)
+		clip.ZIndex = 400
+		clip.Parent = root
 	end
 	return clip
+end
+
+--- Temporary rounded clip (kept for compatibility; see Fx.Host)
+function Fx.Clip(target, radius)
+	return Fx.Host(target, { Radius = radius })
 end
 
 local function cleanup(inst, after)
 	task.delay(after, function() if inst then inst:Destroy() end end)
 end
 
---- Expanding circle + ring from the click point. o = { Color, Alpha, Duration, Radius, X, Y, Ring }
+--- Expanding circle + ring from the click point. o = { Color, Alpha, Duration, Radius, X, Y, Ring, Reach }
+--- The circle is capped (it never floods a whole wide row), starts soft and fades while it grows.
 function Fx.Ripple(target, o)
 	if not Fx.Enabled or not target or not target.Parent then return end
 	o = o or {}
 	local x, y, w, h = pointerIn(target)
 	if o.X then x, y = o.X, o.Y or y end
 	local color = fxColor(o.Color)
-	local dur = o.Duration or 0.6
-	local reach = math.sqrt(math.max(x, w - x) ^ 2 + math.max(y, h - y) ^ 2) * 2 + 6
-	local clip = Fx.Clip(target, o.Radius)
+	local dur = o.Duration or 0.55
+	local clip = Fx.Host(target, { Radius = o.Radius })
+	if not clip then return end
+	local reach = math.min(math.sqrt(math.max(x, w - x) ^ 2 + math.max(y, h - y) ^ 2) * 2 + 6, o.Reach or 170)
 
 	local blob = fullCircle(clip, {
 		AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(0, 0),
-		BackgroundColor3 = color, BackgroundTransparency = o.Alpha or 0.8,
+		BackgroundColor3 = color, BackgroundTransparency = o.Alpha or 0.84,
 	})
 	Util.Tween(blob, dur * 0.95, { Size = UDim2.fromOffset(reach, reach) }, "Out")
 	Util.Tween(blob, dur, { BackgroundTransparency = 1 }, "Quad")
@@ -1056,8 +1427,8 @@ function Fx.Ripple(target, o)
 			AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(6, 6),
 			BackgroundTransparency = 1,
 		})
-		local st = New("UIStroke", { Thickness = 1.5, Color = color, Transparency = 0.25, Parent = ring })
-		Util.Tween(ring, dur * 0.8, { Size = UDim2.fromOffset(reach * 0.75, reach * 0.75) }, "Out")
+		local st = New("UIStroke", { Thickness = 1.5, Color = color, Transparency = 0.3, Parent = ring })
+		Util.Tween(ring, dur * 0.8, { Size = UDim2.fromOffset(reach * 0.7, reach * 0.7) }, "Out")
 		Util.Tween(st, dur * 0.8, { Transparency = 1 }, "Quad")
 	end
 	cleanup(clip, dur + 0.1)
@@ -1067,9 +1438,16 @@ end
 function Fx.Burst(target, o)
 	if not Fx.Enabled or not target or not target.Parent then return end
 	o = o or {}
-	local parent = o.Parent or target
+	local parent, ownHost = o.Parent, nil
 	local x, y = o.X, o.Y
-	if not x then x, y = pointerIn(parent) end
+	if not parent then
+		ownHost = Fx.Host(target, { Clip = false })
+		if not ownHost then return end
+		parent = ownHost
+		if not x then x, y = pointerIn(target) end
+	elseif not x then
+		x, y = pointerIn(parent)
+	end
 	local a, b = fxColor(o.Color), fxColor(o.Color2 or (o.Color == nil and "Accent2" or o.Color))
 	local count, dist, size, dur = o.Count or 7, o.Distance or 26, o.Size or 4, o.Duration or 0.55
 	local seed = math.random() * math.pi
@@ -1087,13 +1465,15 @@ function Fx.Burst(target, o)
 		}, "Out")
 		cleanup(dot, dur + 0.05)
 	end
+	if ownHost then cleanup(ownHost, dur + 0.1) end
 end
 
 --- Quick colour wash over a surface. o = { Color, Alpha, Duration, Radius }
 function Fx.Flash(target, o)
 	if not Fx.Enabled or not target or not target.Parent then return end
 	o = o or {}
-	local clip = Fx.Clip(target, o.Radius)
+	local clip = Fx.Host(target, { Radius = o.Radius })
+	if not clip then return end
 	local f = New("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = fxColor(o.Color), BackgroundTransparency = o.Alpha or 0.82, Parent = clip })
 	local dur = o.Duration or 0.45
 	Util.Tween(f, dur, { BackgroundTransparency = 1 }, "Quad")
@@ -1104,7 +1484,8 @@ end
 function Fx.Sheen(target, o)
 	if not Fx.Enabled or not target or not target.Parent then return end
 	o = o or {}
-	local clip = Fx.Clip(target, o.Radius)
+	local clip = Fx.Host(target, { Radius = o.Radius })
+	if not clip then return end
 	local bar = New("Frame", {
 		AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(-0.25, 0, 0.5, 0), Size = UDim2.new(0.3, 0, 3, 0),
 		Rotation = 16, BackgroundColor3 = fxColor(o.Color or WHITE), Parent = clip,
@@ -1118,21 +1499,23 @@ function Fx.Sheen(target, o)
 end
 
 --- The click effect used by every control (change it with Vesper:SetClickEffect)
---- o = { Color, Radius, Style }
+--- o = { Color, Radius, Style }. It also lights the target's corner stroke for a moment.
 function Fx.Click(target, o)
 	if not Fx.Enabled then return end
 	o = o or {}
+	local edge = target and Util.Part(target, "Edge")
+	if edge then Edge.Pulse(edge) end
 	local style = o.Style or Fx.Style
 	if style == "None" then return end
 	if style == "Burst" then
-		Fx.Ripple(target, { Color = o.Color, Radius = o.Radius, Alpha = 0.86, Ring = false, Duration = 0.5 })
+		Fx.Ripple(target, { Color = o.Color, Radius = o.Radius, Alpha = 0.88, Ring = false, Duration = 0.5 })
 		Fx.Burst(target, { Color = o.Color, Count = 6, Distance = 22, Size = 3.5 })
 	elseif style == "Pulse" then
-		Fx.Flash(target, { Color = o.Color, Radius = o.Radius, Alpha = 0.86, Duration = 0.5 })
-		Fx.Ripple(target, { Color = o.Color, Radius = o.Radius, Alpha = 1, Duration = 0.6 })
+		Fx.Flash(target, { Color = o.Color, Radius = o.Radius, Alpha = 0.88, Duration = 0.5 })
+		Fx.Ripple(target, { Color = o.Color, Radius = o.Radius, Alpha = 1, Duration = 0.55 })
 	elseif style == "Sheen" then
 		Fx.Sheen(target, { Color = o.Sheen or WHITE, Radius = o.Radius, Alpha = 0.75, Duration = 0.55 })
-		Fx.Ripple(target, { Color = o.Color, Radius = o.Radius, Alpha = 0.9, Ring = false, Duration = 0.5 })
+		Fx.Ripple(target, { Color = o.Color, Radius = o.Radius, Alpha = 0.92, Ring = false, Duration = 0.5 })
 	else
 		Fx.Ripple(target, { Color = o.Color, Radius = o.Radius })
 	end
@@ -1176,7 +1559,24 @@ function Fx.SpinRing(parent, o)
 	})
 	Theme.Bind(g, { Color = Theme.AccentSeq })
 	if Theme.Animated then Util.Loop(g, o.Speed or 1.1, { Rotation = 360 }, "Linear") end
+	Util.SetPart(holder, "Grad", g)
+	Util.SetPart(holder, "Arc", as)
+	Util.SetPart(holder, "Track", ts)
 	return holder
+end
+
+--- Re-colour a spin ring. tone = nil (the normal accent sweep) | "Success" | "Danger" | "Warning" ...
+--- full = true draws the whole circle (used for "done" and "failed").
+local RING_SWEEP = NumberSequence.new({ kp(0, 1), kp(0.45, 1), kp(0.75, 0.25), kp(1, 0) })
+function Fx.RingTone(ring, tone, full)
+	local g = Util.Part(ring, "Grad")
+	if not g then return end
+	if tone then
+		Theme.Bind(g, { Color = function(t) local c = t[tone] or t.Accent; return ColorSequence.new(c, c) end })
+	else
+		Theme.Bind(g, { Color = Theme.AccentSeq })
+	end
+	g.Transparency = full and NumberSequence.new(0) or RING_SWEEP
 end
 
 -- ─────────────────────────────────────────────────────────────
@@ -1449,7 +1849,7 @@ function Fx.Backdrop(parent, zindex)
 	return root
 end
 
---- Top highlight line + bottom vignette that give a surface its sheen. Returns the container.
+--- Bottom vignette that gives a surface its depth (the top edge light comes from the corner stroke). Returns the container.
 function Fx.Gloss(parent, zindex)
 	local box = New("Frame", { Name = "Gloss", BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1), ZIndex = zindex or 1, Active = false, Parent = parent })
 	local vignette = New("Frame", {
@@ -1457,8 +1857,7 @@ function Fx.Gloss(parent, zindex)
 		BackgroundColor3 = BLACK, BackgroundTransparency = 0.5, Parent = box,
 	})
 	New("UIGradient", { Rotation = 90, Transparency = NumberSequence.new({ kp(0, 1), kp(1, 0.55) }), Parent = vignette })
-	local top = Util.FadeLine(box, { Position = UDim2.new(0, 0, 0, 0), Size = UDim2.new(1, 0, 0, 1), Strength = 0.6, Token = "Accent", ZIndex = 2, Thickness = 1 })
-	return box, top
+	return box
 end
 
 -- ─────────────────────────────────────────────────────────────
@@ -1608,6 +2007,8 @@ function Util.HoverFx(btn, target, normal, hover, press, prop)
 	local function apply()
 		local token = (pressing and (press or hover)) or (hovering and hover) or normal
 		Util.Tween(target, 0.14, { [prop] = Theme.Resolve(token) }, "Quad")
+		local edge = Util.Part(target, "Edge")
+		if edge then Edge.Level(edge, pressing and 1 or (hovering and 0.55 or (edge.Rest or 0)), 0.16) end
 	end
 	btn.MouseEnter:Connect(function() hovering = true; apply() end)
 	btn.MouseLeave:Connect(function() hovering = false; pressing = false; apply() end)
@@ -1654,24 +2055,25 @@ function Util.MakeButton(o)
 		Theme.AccentGradient(btn, 20)
 		normal, hover, press = nil, nil, nil
 		fxColor = WHITE
-		depth = Shadow.Edge(btn, { Alpha = 0.72, Inset = 6 })
+		local edge = Edge.Attach(btn, "Primary", { Radius = radius, Token = function() return WHITE end, Alpha = 0.6, Inset = 6, ShadowAlpha = 0.72, ZIndex = 4 })
+		depth = edge.Contact
 		Theme.Bind(depth, { BackgroundColor3 = function(t) return t.Accent:Lerp(BLACK, 0.55) end })
 	elseif variant == "Danger" then
 		textToken = function() return WHITE end
 		normal, hover, press = "Danger", function(t) return t.Danger:Lerp(WHITE, 0.12) end, function(t) return t.Danger:Lerp(BLACK, 0.15) end
 		fxColor = WHITE
-		depth = Shadow.Edge(btn, { Alpha = 0.72, Inset = 6 })
+		local edge = Edge.Attach(btn, "Primary", { Radius = radius, Token = function() return WHITE end, Alpha = 0.55, Inset = 6, ShadowAlpha = 0.72, ZIndex = 4 })
+		depth = edge.Contact
 		Theme.Bind(depth, { BackgroundColor3 = function(t) return t.Danger:Lerp(BLACK, 0.6) end })
 	elseif variant == "Ghost" then
 		btn.BackgroundTransparency = 1
 		normal, hover, press = "Input", "Input", "InputHover"
-		Util.FadeLine(btn, { Position = UDim2.new(0, 0, 0, 0), Size = UDim2.new(1, 0, 0, 1), Strength = 0.5, ZIndex = 3, Thickness = 1 })
-		Util.FadeLine(btn, { Position = UDim2.new(0, 0, 1, -1), Size = UDim2.new(1, 0, 0, 1), Strength = 0.5, ZIndex = 3, Thickness = 1 })
+		Edge.Attach(btn, "Button", { Radius = radius, Alpha = 0.6, Contact = false, ZIndex = 4 })
 	else
 		Util.Shade(btn, 90, 0.09)
-		depth = Shadow.Edge(btn, { Alpha = 0.8, Inset = 6 })
-		Util.FadeLine(btn, { Position = UDim2.new(0, 0, 0, 0), Size = UDim2.new(1, 0, 0, 1), Strength = 0.32, ZIndex = 3, Thickness = 1 })
+		Edge.Attach(btn, "Button", { Radius = radius, Alpha = 0.55, Inset = 6, ShadowAlpha = 0.8, ZIndex = 4 })
 	end
+	Util.PressScale(btn, btn, 0.965)
 
 	if normal then
 		Theme.Bind(btn, { BackgroundColor3 = normal })
@@ -1756,7 +2158,6 @@ function Util.OpenPopover(host, overlay, anchor, opts)
 	Theme.Bind(canvas, { BackgroundColor3 = "Popup" })
 	Util.Shade(canvas, 90, 0.07)
 	local pop = New("UIScale", { Scale = 0.94, Parent = holder })
-	Util.FadeLine(canvas, { Position = UDim2.new(0, 0, 0, 0), Size = UDim2.new(1, 0, 0, 1), Strength = 0.7, Token = "Accent", ZIndex = 5, Thickness = 1 })
 
 	local closed = false
 	local object = { Holder = holder, Frame = canvas }
@@ -1798,7 +2199,6 @@ function Util.Dialog(parent, opts)
 	Theme.Bind(card, { BackgroundColor3 = "Popup" })
 	Util.Shade(card, 90, 0.08)
 	local scale = New("UIScale", { Scale = 0.9, Parent = holder })
-	Util.FadeLine(card, { Position = UDim2.new(0, 0, 0, 0), Size = UDim2.new(1, 0, 0, 1), Strength = 0.9, Token = "Accent", ZIndex = 5, Thickness = 1 })
 
 	local body = New("Frame", { Name = "Body", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, Parent = card })
 	Util.Padding(body, 20, 20, 18, 20)
@@ -1982,7 +2382,7 @@ function Vesper:Notify(opts)
 	local accent = New("Frame", { Name = "Accent", Size = UDim2.new(0, 3, 1, 0), BackgroundColor3 = WHITE, ZIndex = 3, Parent = card })
 	Theme.Bind(accent, { BackgroundColor3 = function(t) return opts.Color or t[token] end })
 	New("UIGradient", { Rotation = 90, Transparency = NumberSequence.new({ kp(0, 0.1), kp(0.7, 0.2), kp(1, 0.9) }), Parent = accent })
-	Util.FadeLine(card, { Position = UDim2.new(0, 0, 0, 0), Size = UDim2.new(1, 0, 0, 1), Strength = 0.6, Token = function(t) return opts.Color or t[token] end, ZIndex = 4, Thickness = 1 })
+	Edge.SetToken(Util.Part(card, "Edge"), function(t) return (opts.Color or t[token]):Lerp(t.Stroke, 0.35) end)
 
 	local body = New("Frame", { Name = "Body", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, Parent = card })
 	local pad = compact and 9 or 13
@@ -2133,13 +2533,53 @@ Tab.__index = Tab
 local TabSection = {}
 TabSection.__index = TabSection
 
-local SIDEBAR_W, SIDEBAR_C, TOPBAR_H = 188, 58, 50
+local SIDEBAR_W, SIDEBAR_C, TOPBAR_H = 196, 60, 52
 local PILL_W, PILL_H = 250, 42
 local HANDLE_H = 22    -- room kept under the window for the move handle
-local EDGE = 8         -- the window never gets closer than this to the screen edge
+local EDGE = 14        -- the window never gets closer than this to the screen edge (the resize grip hangs outside it)
 
 -- How see-through the layers are (the animated background shows through them)
 local Look = { Panel = 0.34, Card = 0.1, Sidebar = 0.08 }
+
+--- Fold / unfold a frame that sizes itself to its content by animating its height (it never snaps).
+--- Used by sidebar groups. `scaleOf` returns the UI scale so the pixel height is right.
+function Util.Fold(body, layout, open, instant, scaleOf)
+	local scale = scaleOf and scaleOf() or 1
+	local token = (Util.Part(body, "FoldToken") or 0) + 1
+	Util.SetPart(body, "FoldToken", token)
+	if instant then
+		body.Visible = open
+		body.AutomaticSize = Enum.AutomaticSize.Y
+		body.Size = UDim2.new(1, 0, 0, 0)
+		body.ClipsDescendants = false
+		return
+	end
+	body.ClipsDescendants = true
+	if open then
+		body.Visible = true
+		body.AutomaticSize = Enum.AutomaticSize.None
+		body.Size = UDim2.new(1, 0, 0, math.max(body.AbsoluteSize.Y / scale, 0))
+		local tween = Util.Tween(body, 0.36, { Size = UDim2.new(1, 0, 0, layout.AbsoluteContentSize.Y / scale) }, "Out")
+		if tween then
+			tween.Completed:Connect(function()
+				if Util.Part(body, "FoldToken") == token then
+					body.AutomaticSize = Enum.AutomaticSize.Y
+					body.Size = UDim2.new(1, 0, 0, 0)
+					body.ClipsDescendants = false
+				end
+			end)
+		end
+	else
+		body.AutomaticSize = Enum.AutomaticSize.None
+		body.Size = UDim2.new(1, 0, 0, body.AbsoluteSize.Y / scale)
+		local tween = Util.Tween(body, 0.3, { Size = UDim2.new(1, 0, 0, 0) }, "Out")
+		if tween then
+			tween.Completed:Connect(function()
+				if Util.Part(body, "FoldToken") == token then body.Visible = false end
+			end)
+		end
+	end
+end
 
 local function setOrTween(inst, time, props, instant, ease)
 	if instant then
@@ -2179,8 +2619,12 @@ local function makeLogo(parent, icon, size, radius)
 	Util.Corner(tile, radius)
 	local data = Icons.Resolve(icon or "sparkles", 48)
 	if data and not data.Lucide then
+		-- your own picture: PNG / JPG, an asset id, a workspace file or a url
 		tile.BackgroundTransparency = 1
-		Util.Corner(New("ImageLabel", { Size = UDim2.fromScale(1, 1), Image = data.Image, Parent = tile }), radius)
+		local img = New("ImageLabel", { Name = "Image", Size = UDim2.fromScale(1, 1), ScaleType = Enum.ScaleType.Crop, ZIndex = 2, Parent = tile })
+		Util.Corner(img, radius)
+		Icons.Apply(img, icon, 48)
+		Util.SetPart(tile, "Image", img)
 	else
 		Theme.AccentGradient(tile, 45)
 		Util.SetPart(tile, "Icon", Util.Icon(tile, icon or "sparkles", math.floor(size * 0.5), "AccentText", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5) }))
@@ -2226,8 +2670,17 @@ function Vesper:CreateWindow(opts)
 	if opts.Sounds ~= nil then Sound.Enabled = opts.Sounds end
 	if opts.Localization then Vesper:Localization(opts.Localization) end
 	Layer.Init()
+	-- Mode is independent from the theme: every theme has a Dark and a Light version.
+	-- (themes that used to be light-only still open light when no Mode is given)
+	if opts.Theme and Theme.Specs[opts.Theme] and opts.Mode == nil and not Theme.ModeExplicit
+		and Theme.Specs[opts.Theme].Spec.Mode == "Light" then
+		Theme.SetMode("Light", true)
+		Theme.ModeExplicit = false
+	end
+	if opts.Mode then Theme.SetMode(opts.Mode, true) end
 	if opts.Theme and Theme.Themes[opts.Theme] then Theme.Set(opts.Theme, true) end
 	if opts.Background then Theme.SetStyle(opts.Background) end
+	if type(opts.Edge) == "table" then Edge.Set(opts.Edge) elseif type(opts.Edge) == "string" then Edge.Set({ Mode = opts.Edge }) end
 
 	-- Size ────────────────────────────────────────────────
 	local touch = Util.IsTouch()
@@ -2290,10 +2743,24 @@ function Vesper:CreateWindow(opts)
 	Util.List(self.TabScroll, 4)
 
 	self.Footer = New("Frame", { Name = "Footer", AnchorPoint = Vector2.new(0, 1), Position = UDim2.fromScale(0, 1), Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, Parent = sidebar })
-	Util.Padding(self.Footer, 6, 10, 10, 10)
+	Util.Padding(self.Footer, 4, 10, 10, 10)
 	Util.List(self.Footer, 4)
 	self.FooterLine = Util.FadeLine(sidebar, { AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 10, 1, -1), Size = UDim2.new(1, -20, 0, 1), Strength = 0.4, ZIndex = 4 })
 	self.FooterLine.Visible = false
+	-- the group at the bottom (built-in tabs) can be folded with its arrow
+	local fhead = New("TextButton", { Name = "FooterHead", Size = UDim2.new(1, 0, 0, 24), LayoutOrder = 0, Visible = false, Parent = self.Footer })
+	self.FooterHead = fhead
+	self.FooterLabel = New("TextLabel", { Weight = "SemiBold", TextSize = 11, Position = UDim2.new(0, 6, 0, 0), Size = UDim2.new(1, -30, 1, 0), Parent = fhead })
+	Theme.Bind(self.FooterLabel, { TextColor3 = "Muted" })
+	Util.SetText(self.FooterLabel, opts.FooterTitle or "More")
+	self.FooterChevron = Util.Icon(fhead, "chevron-down", 14, "Muted", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -6, 0.5, 0) })
+	self.FooterBody = New("Frame", { Name = "FooterBody", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, LayoutOrder = 1, Parent = self.Footer })
+	self.FooterBodyList = Util.List(self.FooterBody, 4)
+	self.FooterOpen = true
+	fhead.MouseEnter:Connect(function() Util.Tween(self.FooterChevron, 0.15, { ImageColor3 = Theme.Current.Text }, "Quad") end)
+	fhead.MouseLeave:Connect(function() Util.Tween(self.FooterChevron, 0.2, { ImageColor3 = Theme.Current.Muted }, "Quad") end)
+	fhead.Activated:Connect(function() Sound.Play("Click"); self:SetFooterOpen(not self.FooterOpen) end)
+	self.Footer:GetPropertyChangedSignal("AbsoluteSize"):Connect(function() self:_FitFooter() end)
 
 	-- Content: top bar + pages ───────────────────────────
 	local content = New("Frame", { Name = "Content", BackgroundTransparency = 1, Position = UDim2.new(0, SIDEBAR_W, 0, 0), Size = UDim2.new(1, -SIDEBAR_W, 1, 0), ClipsDescendants = true, ZIndex = 2, Parent = main })
@@ -2353,11 +2820,31 @@ function Vesper:CreateWindow(opts)
 	self.Pages = New("Frame", { Name = "Pages", BackgroundTransparency = 1, Position = UDim2.new(0, 0, 0, TOPBAR_H), Size = UDim2.new(1, 0, 1, -TOPBAR_H), Parent = content })
 	Util.Padding(self.Pages, 4, 12, 12, 12)
 
-	-- Resize grip
-	local grip = New("TextButton", { Name = "Resize", AnchorPoint = Vector2.new(1, 1), Position = UDim2.fromScale(1, 1), Size = UDim2.fromOffset(22, 22), ZIndex = 20, Parent = main })
-	Util.Icon(grip, "move-diagonal-2", 11, "Muted", { AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -6, 1, -6), Rotation = 90 })
-	self.ResizeGrip = grip
-	grip.Visible = self.Resizable
+	-- Resize grip: a round handle that hangs OUTSIDE the bottom-right corner (it lives next to the window, not inside it)
+	local gripHolder = New("CanvasGroup", {
+		Name = "Resize", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(1, 1, 1, 1), Size = UDim2.fromOffset(26, 26),
+		BackgroundTransparency = 1, GroupTransparency = 1, ZIndex = 6, Parent = holder,
+	})
+	local disc = New("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, Parent = gripHolder })
+	Theme.Bind(disc, { BackgroundColor3 = "Popup" })
+	Util.Corner(disc, 26)
+	Util.Shade(disc, 90, 0.1)
+	Edge.Attach(disc, "Chip", { Radius = 26, Alpha = 0.7, Contact = false, ZIndex = 4 })
+	local gripIcon = Util.Icon(disc, "move-diagonal-2", 13, "SubText", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Rotation = 90, ZIndex = 3 })
+	local grip = New("TextButton", { Name = "Hit", Size = UDim2.fromScale(1, 1), ZIndex = 8, Parent = gripHolder })
+	Util.SetPart(main, "Extras", { gripHolder })
+	self.ResizeGrip, self.ResizeHit, self.ResizeIcon, self.ResizeDisc = gripHolder, grip, gripIcon, disc
+	gripHolder.Visible = self.Resizable
+	grip.MouseEnter:Connect(function()
+		Util.Tween(gripIcon, 0.15, { ImageColor3 = Theme.Current.Accent }, "Quad")
+		Util.Tween(gripHolder, 0.2, { Size = UDim2.fromOffset(30, 30) }, "Back")
+	end)
+	grip.MouseLeave:Connect(function()
+		if not self._resizing then
+			Util.Tween(gripIcon, 0.2, { ImageColor3 = Theme.Current.SubText }, "Quad")
+			Util.Tween(gripHolder, 0.25, { Size = UDim2.fromOffset(26, 26) }, "Back")
+		end
+	end)
 
 	-- Behaviour ───────────────────────────────────────────
 	self.Host:OnViewport(function() self:_Rescale() end)
@@ -2519,6 +3006,7 @@ function Window:SetSidebarCollapsed(collapsed, auto, instant)
 	}, instant)
 	setOrTween(self.TitleLabel, 0.2, { TextTransparency = collapsed and 1 or 0 }, instant)
 	setOrTween(self.SubtitleLabel, 0.2, { TextTransparency = collapsed and 1 or 0 }, instant)
+	setOrTween(self.FooterLabel, 0.2, { TextTransparency = collapsed and 1 or 0 }, instant)
 	for _, tab in self.Tabs do tab:_ApplyCollapse(collapsed, instant) end
 	for _, tab in self.FooterTabs do tab:_ApplyCollapse(collapsed, instant) end
 	for _, section in self.TabSections do section:_ApplyCollapse(collapsed, instant) end
@@ -2565,8 +3053,8 @@ end
 
 -- ─────────────────────────────────────────────────────────────
 --  Tabs
---  The active tab gets a gradient wash and two fading hairlines instead of a stroke,
---  so it looks the same expanded and collapsed to icons.
+--  The active tab slides to the right, gets a gradient wash and an accent stroke that hugs its
+--  corners and fades out before it closes, so it looks the same expanded and collapsed to icons.
 -- ─────────────────────────────────────────────────────────────
 function Tab:_ApplyCollapse(collapsed, instant)
 	setOrTween(self.Label, 0.2, { TextTransparency = collapsed and 1 or 0 }, instant)
@@ -2580,36 +3068,42 @@ function Tab:_Paint(active, instant)
 	self.Active = active
 	local iconColor = Theme.Resolve(active and "Accent" or "SubText")
 	local textColor = Theme.Resolve(active and "Text" or "SubText")
+	local shift = active and 6 or 0
 	setOrTween(self.Fill, 0.25, { BackgroundTransparency = active and 0.78 or 1 }, instant, "Quad")
-	setOrTween(self.LineTop, 0.25, { BackgroundTransparency = active and 0 or 1 }, instant, "Quad")
-	setOrTween(self.LineBottom, 0.25, { BackgroundTransparency = active and 0 or 1 }, instant, "Quad")
+	setOrTween(self.EdgeHandle.Stroke, 0.3, { Transparency = active and 0 or 1 }, instant, "Quad")
 	setOrTween(self.Icon, 0.2, { ImageColor3 = iconColor }, instant, "Quad")
 	setOrTween(self.Label, 0.2, { TextColor3 = textColor }, instant, "Quad")
 	setOrTween(self.Bar, 0.3, { Size = UDim2.fromOffset(3, active and 20 or 0) }, instant, active and "Back" or "Quad")
+	-- the selected tab slides to the right, the rest of the sidebar stays put
+	setOrTween(self.Face, 0.38, { Position = UDim2.fromOffset(shift, 0), Size = UDim2.new(1, -shift, 1, 0) }, instant, active and "Back" or "Out")
 end
 
 function Window:_BuildTabButton(parent, opts, tab, order)
-	local btn = New("TextButton", { Name = "Tab", Size = UDim2.new(1, 0, 0, 38), BackgroundTransparency = 1, LayoutOrder = order, Parent = parent })
+	local btn = New("TextButton", { Name = "Tab", Size = UDim2.new(1, 0, 0, 40), BackgroundTransparency = 1, LayoutOrder = order, Parent = parent })
 	Util.Corner(btn, 10)
 	tab.NavButton = btn
 
+	-- everything visible lives on the face, so the whole tab can slide without touching the layout
+	local face = New("Frame", { Name = "Face", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Active = false, Parent = btn })
+	Util.Corner(face, 10)
+	tab.Face = face
+
 	-- gradient wash that fades out to the right
-	tab.Fill = New("Frame", { Name = "Fill", Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, BackgroundTransparency = 1, Active = false, Parent = btn })
+	tab.Fill = New("Frame", { Name = "Fill", Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, BackgroundTransparency = 1, Active = false, Parent = face })
 	Util.Corner(tab.Fill, 10)
 	local fillGrad = New("UIGradient", { Transparency = NumberSequence.new({ kp(0, 0), kp(0.55, 0.45), kp(1, 1) }), Parent = tab.Fill })
 	Theme.Bind(fillGrad, { Color = Theme.AccentSeq })
 
-	tab.LineTop = Util.FadeLine(btn, { Position = UDim2.new(0, 4, 0, 0), Size = UDim2.new(1, -8, 0, 1), Style = "Left", Strength = 1, Token = "Accent", ZIndex = 2, Thickness = 1 })
-	tab.LineBottom = Util.FadeLine(btn, { AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 4, 1, 0), Size = UDim2.new(1, -8, 0, 1), Style = "Left", Strength = 0.7, Token = "Accent", ZIndex = 2, Thickness = 1 })
-	tab.LineTop.BackgroundTransparency = 1
-	tab.LineBottom.BackgroundTransparency = 1
+	-- the highlight: an accent stroke that follows the corners and fades out before it can close the loop
+	tab.EdgeHandle = Edge.Attach(face, "Tab", { Radius = 10, Token = "Accent", Alpha = 0.95, Fade = 0.34, Contact = false, ZIndex = 4 })
+	Edge.Fade(tab.EdgeHandle, 1, 0, nil, true)
 
-	tab.Icon = Util.Icon(btn, opts.Icon or "layout-dashboard", 18, "SubText", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 14, 0.5, 0), ZIndex = 3 })
+	tab.Icon = Util.Icon(face, opts.Icon or "layout-dashboard", 19, "SubText", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 14, 0.5, 0), ZIndex = 3 })
 	Theme.Bind(tab.Icon, { ImageColor3 = function(t) return tab.Active and t.Accent or t.SubText end })
-	tab.Label = New("TextLabel", { Weight = "Medium", TextSize = 14, Position = UDim2.new(0, 44, 0, 0), Size = UDim2.new(1, -52, 1, 0), TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 3, Parent = btn })
+	tab.Label = New("TextLabel", { Weight = "Medium", TextSize = 14.5, Position = UDim2.new(0, 45, 0, 0), Size = UDim2.new(1, -53, 1, 0), TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 3, Parent = face })
 	Theme.Bind(tab.Label, { TextColor3 = function(t) return tab.Active and t.Text or t.SubText end })
 	Util.SetText(tab.Label, opts.Title or "Tab")
-	tab.Bar = New("Frame", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 0, 0.5, 0), Size = UDim2.fromOffset(3, 0), BackgroundColor3 = WHITE, ZIndex = 3, Parent = btn })
+	tab.Bar = New("Frame", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 0, 0.5, 0), Size = UDim2.fromOffset(3, 0), BackgroundColor3 = WHITE, ZIndex = 3, Parent = face })
 	Util.Corner(tab.Bar, 2)
 	Theme.AccentGradient(tab.Bar, 90)
 
@@ -2617,6 +3111,7 @@ function Window:_BuildTabButton(parent, opts, tab, order)
 		if not tab.Active then
 			Util.Tween(tab.Fill, 0.14, { BackgroundTransparency = 0.9 }, "Quad")
 			Util.Tween(tab.Icon, 0.14, { ImageColor3 = Theme.Resolve("Text") }, "Quad")
+			Util.Tween(face, 0.25, { Position = UDim2.fromOffset(3, 0), Size = UDim2.new(1, -3, 1, 0) }, "Out")
 		end
 		if self.Collapsed then self:_ShowTip(btn, tab.Title) end
 	end)
@@ -2624,9 +3119,11 @@ function Window:_BuildTabButton(parent, opts, tab, order)
 		if not tab.Active then
 			Util.Tween(tab.Fill, 0.14, { BackgroundTransparency = 1 }, "Quad")
 			Util.Tween(tab.Icon, 0.14, { ImageColor3 = Theme.Resolve("SubText") }, "Quad")
+			Util.Tween(face, 0.3, { Position = UDim2.fromOffset(0, 0), Size = UDim2.fromScale(1, 1) }, "Out")
 		end
 		self:_HideTip()
 	end)
+	Util.PressScale(btn, face, 0.97)
 	btn.Activated:Connect(function()
 		Sound.Play("Select")
 		Fx.Click(btn, { Radius = UDim.new(0, 10) })
@@ -2675,13 +3172,31 @@ function Window:_NewTab(opts, parent, footer)
 end
 
 function Window:Tab(opts) return self:_NewTab(opts, self.TabScroll, false) end
-function Window:_FooterTab(opts) return self:_NewTab(opts, self.Footer, true) end
+function Window:_FooterTab(opts) return self:_NewTab(opts, self.FooterBody, true) end
 
 function Window:_UpdateFooter()
 	local n = #self.FooterTabs
-	local h = n > 0 and (n * 42 + 16) or 0
-	self.TabScroll.Size = UDim2.new(1, 0, 1, -66 - h)
+	self.FooterHead.Visible = n > 0
 	self.FooterLine.Visible = n > 0
+	self:_FitFooter()
+end
+
+--- The tab list always ends where the footer begins, however tall the footer is (it animates when folded)
+function Window:_FitFooter()
+	local scale = self.Host:GetScale()
+	local h = self.Footer.AbsoluteSize.Y / scale
+	if #self.FooterTabs == 0 then h = 0 end
+	self.TabScroll.Size = UDim2.new(1, 0, 1, -(66 + h))
+	self.FooterLine.Position = UDim2.new(0, 10, 1, -(h + 1))
+end
+
+--- Fold or unfold the footer group (the built-in tabs at the bottom of the sidebar)
+function Window:SetFooterOpen(open, instant)
+	open = open ~= false
+	if self.FooterOpen == open then return end
+	self.FooterOpen = open
+	Util.Fold(self.FooterBody, self.FooterBodyList, open, instant, function() return self.Host:GetScale() end)
+	if self.FooterChevron then setOrTween(self.FooterChevron, 0.3, { Rotation = open and 0 or 180 }, instant, "Back") end
 end
 
 function Window:SelectTab(tab, instant)
@@ -2706,8 +3221,8 @@ function Window:SelectTab(tab, instant)
 	if prev then
 		prev:_Paint(false, instant)
 		local page = prev.Page
-		Util.Tween(page, 0.12, { GroupTransparency = 1 }, "Quad")
-		task.delay(0.13, function() if self.SelectedTab ~= prev then page.Visible = false end end)
+		Util.Tween(page, 0.16, { GroupTransparency = 1, Position = UDim2.fromOffset(-18, 0) }, "Quad")
+		task.delay(0.17, function() if self.SelectedTab ~= prev then page.Visible = false end end)
 	end
 	tab:_Paint(true, instant)
 	local page = tab.Page
@@ -2716,10 +3231,10 @@ function Window:SelectTab(tab, instant)
 		page.GroupTransparency = 0
 		page.Position = UDim2.new()
 	else
-		page.Position = UDim2.fromOffset(0, 12)
-		task.delay(0.08, function()
+		page.Position = UDim2.fromOffset(26, 0)
+		task.delay(0.1, function()
 			if self.SelectedTab ~= tab then return end
-			Util.Tween(page, 0.34, { GroupTransparency = 0, Position = UDim2.new() }, "Out")
+			Util.Tween(page, 0.42, { GroupTransparency = 0, Position = UDim2.new() }, "Out")
 			Fx.Scan(page)
 		end)
 	end
@@ -2785,29 +3300,44 @@ function Window:TabSection(opts)
 	self._tabCounter += 1
 	local frame = New("Frame", { Name = "TabSection", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, LayoutOrder = self._tabCounter, Parent = self.TabScroll })
 	Util.List(frame, 4)
-	local head = New("TextButton", { Size = UDim2.new(1, 0, 0, 24), LayoutOrder = 0, Parent = frame })
+	local collapsible = opts.Collapsible ~= false
+	local head = New("TextButton", { Size = UDim2.new(1, 0, 0, 26), LayoutOrder = 0, Parent = frame })
+	section.Head = head
 	section.Label = New("TextLabel", { Weight = "SemiBold", TextSize = 11, Position = UDim2.new(0, 6, 0, 0), Size = UDim2.new(1, -30, 1, 0), Parent = head })
 	Theme.Bind(section.Label, { TextColor3 = "Muted" })
 	Util.SetText(section.Label, opts.Title or "Section")
 	section.Line = Util.FadeLine(head, { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 4, 0.5, 0), Size = UDim2.new(1, -8, 0, 1), Strength = 0.6, ZIndex = 2, Thickness = 1 })
 	section.Line.BackgroundTransparency = 1
-	local chevron = Util.Icon(head, "chevron-down", 13, "Muted", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -6, 0.5, 0) })
-	chevron.Visible = opts.Collapsible == true
+	-- the arrow points right ( > ) while the group is closed and turns down ( v ) as it opens
+	local chevron = Util.Icon(head, "chevron-right", 14, "Muted", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -6, 0.5, 0) })
+	section.Chevron = chevron
+	chevron.Visible = collapsible
 	section.Body = New("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, LayoutOrder = 1, Parent = frame })
-	Util.List(section.Body, 4)
+	section.BodyList = Util.List(section.Body, 4)
 
 	section.Opened = opts.Opened ~= false
-	function section.SetOpen(open)
+	function section.SetOpen(open, instant)
+		open = open ~= false
+		if section.Opened == open and not instant then return end
 		section.Opened = open
-		section.Body.Visible = open
-		Util.Tween(chevron, 0.2, { Rotation = open and 0 or -90 }, "Quad")
+		Util.Fold(section.Body, section.BodyList, open, instant, function() return self.Host:GetScale() end)
+		setOrTween(chevron, 0.32, { Rotation = open and 90 or 0 }, instant, "Back")
 	end
-	if opts.Collapsible then
+	if collapsible then
+		head.MouseEnter:Connect(function()
+			Util.Tween(chevron, 0.15, { ImageColor3 = Theme.Current.Text }, "Quad")
+			Util.Tween(section.Label, 0.15, { TextColor3 = Theme.Current.SubText }, "Quad")
+		end)
+		head.MouseLeave:Connect(function()
+			Util.Tween(chevron, 0.2, { ImageColor3 = Theme.Current.Muted }, "Quad")
+			Util.Tween(section.Label, 0.2, { TextColor3 = Theme.Current.Muted }, "Quad")
+		end)
 		head.Activated:Connect(function()
 			section.SetOpen(not section.Opened)
 			Sound.Play("Click")
 		end)
-		if not section.Opened then section.Body.Visible = false; chevron.Rotation = -90 end
+		if not section.Opened then section.Body.Visible = false end
+		chevron.Rotation = section.Opened and 90 or 0
 	else
 		head.Active = false
 	end
@@ -2823,6 +3353,15 @@ end
 function TabSection:_ApplyCollapse(collapsed, instant)
 	setOrTween(self.Label, 0.2, { TextTransparency = collapsed and 1 or 0 }, instant)
 	setOrTween(self.Line, 0.2, { BackgroundTransparency = collapsed and 0 or 1 }, instant)
+	if self.Chevron then setOrTween(self.Chevron, 0.2, { ImageTransparency = collapsed and 1 or 0 }, instant) end
+	-- when the sidebar is narrow every tab must stay reachable, so a closed group opens up
+	if collapsed and not self.Opened and not self._forced then
+		self._forced, self._wasClosed = true, true
+		self.SetOpen(true, instant)
+	elseif not collapsed and self._forced then
+		self._forced = nil
+		if self._wasClosed then self._wasClosed = nil; self.SetOpen(false, instant) end
+	end
 end
 
 -- ─────────────────────────────────────────────────────────────
@@ -2864,7 +3403,7 @@ function Window:_SetupInteractions()
 
 	-- Resizing (bottom-right grip)
 	local rStart, rSize, rOffset
-	self.Maid:Give(Util.Drag(self.ResizeGrip, function(pos)
+	self.Maid:Give(Util.Drag(self.ResizeHit, function(pos)
 		if not rStart then return end
 		local d = (v2(pos) - rStart) / host:GetScale()
 		local max = self:_MaxSize()
@@ -2878,11 +3417,15 @@ function Window:_SetupInteractions()
 	end, function(input)
 		if self.Fullscreen or self._introPlaying then return false end
 		rStart, rSize, rOffset = v2(input.Position), self.Size, self.Offset
+		self._resizing = true
 		if host._popover then host._popover.Close() end
-		Util.Tween(self.ResizeGrip, 0.1, { Size = UDim2.fromOffset(26, 26) }, "Quad")
+		Util.Tween(self.ResizeGrip, 0.12, { Size = UDim2.fromOffset(34, 34) }, "Back")
+		Util.Tween(self.ResizeIcon, 0.12, { ImageColor3 = Theme.Current.Accent }, "Quad")
 	end, function()
 		rStart = nil
-		Util.Tween(self.ResizeGrip, 0.2, { Size = UDim2.fromOffset(22, 22) }, "Quad")
+		self._resizing = false
+		Util.Tween(self.ResizeGrip, 0.25, { Size = UDim2.fromOffset(26, 26) }, "Back")
+		Util.Tween(self.ResizeIcon, 0.2, { ImageColor3 = Theme.Current.SubText }, "Quad")
 	end))
 
 	-- Minimised pill
@@ -2904,7 +3447,6 @@ function Window:_SetupInteractions()
 	local pclose = iconButton(pbtns, "x", 28, 2)
 	restore.Activated:Connect(function() Sound.Play("Click"); self:Restore() end)
 	pclose.Activated:Connect(function() Sound.Play("Click"); self:RequestClose() end)
-	Util.FadeLine(pcanvas, { Position = UDim2.new(0, 0, 0, 0), Size = UDim2.new(1, 0, 0, 1), Strength = 0.7, Token = "Accent", ZIndex = 5, Thickness = 1 })
 
 	self.PillOffset = Vector2.zero
 	local pStart, pOffset
@@ -2920,26 +3462,26 @@ end
 function Window:_MakeHandle()
 	local root = self.Host.Root
 	local hh, hc = Util.Surface(root, {
-		Name = "Handle", AnchorPoint = Vector2.new(0.5, 0), Size = UDim2.fromOffset(92, 7), Visible = false, ZIndex = 5,
-	}, 4)
+		Name = "Handle", AnchorPoint = Vector2.new(0.5, 0), Size = UDim2.fromOffset(150, 5), Visible = false, ZIndex = 5,
+	}, 3)
 	Theme.Bind(hc, { BackgroundColor3 = "Sidebar" })
 	Util.Shade(hc, 90, 0.1)
 	local glow = New("Frame", { Name = "Glow", Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, BackgroundTransparency = 1, Parent = hc })
 	Theme.AccentGradient(glow, 0)
-	local dots = New("Frame", { BackgroundTransparency = 1, AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(20, 3), ZIndex = 2, Parent = hc })
-	Util.List(dots, 4, Enum.FillDirection.Horizontal, Enum.HorizontalAlignment.Center, Enum.VerticalAlignment.Center)
+	local dots = New("Frame", { BackgroundTransparency = 1, AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(26, 3), ZIndex = 2, Parent = hc })
+	Util.List(dots, 5, Enum.FillDirection.Horizontal, Enum.HorizontalAlignment.Center, Enum.VerticalAlignment.Center)
 	for i = 1, 3 do
-		local dot = New("Frame", { Size = UDim2.fromOffset(4, 3), BackgroundColor3 = WHITE, LayoutOrder = i, Parent = dots })
+		local dot = New("Frame", { Size = UDim2.fromOffset(i == 2 and 8 or 4, 3), BackgroundColor3 = WHITE, LayoutOrder = i, Parent = dots })
 		Theme.Bind(dot, { BackgroundColor3 = "Muted" })
 		Util.Corner(dot, 2)
 	end
-	local hit = New("TextButton", { Name = "Hit", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.new(1, 48, 1, 20), ZIndex = 6, Parent = hh })
+	local hit = New("TextButton", { Name = "Hit", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.new(1, 56, 1, 22), ZIndex = 6, Parent = hh })
 	self.Handle, self.HandleCanvas = hh, hc
 
 	local hovering, dragging = false, false
 	local function look()
 		local active = dragging or hovering
-		Util.Tween(hh, 0.22, { Size = dragging and UDim2.fromOffset(132, 10) or (hovering and UDim2.fromOffset(116, 9) or UDim2.fromOffset(92, 7)) }, "Back")
+		Util.Tween(hh, 0.26, { Size = dragging and UDim2.fromOffset(212, 7) or (hovering and UDim2.fromOffset(178, 6) or UDim2.fromOffset(150, 5)) }, "Back")
 		Util.Tween(glow, 0.2, { BackgroundTransparency = dragging and 0.1 or (hovering and 0.6 or 1) }, "Quad")
 		for _, d in dots:GetChildren() do
 			if d:IsA("Frame") then Util.Tween(d, 0.2, { BackgroundTransparency = active and 0.1 or 0 }, "Quad") end
@@ -3243,11 +3785,33 @@ function Window:ToggleFullscreen()
 		self.Size, self.Offset = self:_MaxSize(), Vector2.zero
 		self.Offset = self:_Clamped(Vector2.zero, self.Size, self.HandleEnabled and HANDLE_H or 0)
 	end
-	Util.Tween(self.Holder, 0.38, {
-		Size = UDim2.fromOffset(self.Size.X, self.Size.Y),
-		Position = UDim2.new(0.5, self.Offset.X, 0.5, self.Offset.Y),
-	}, "Out")
-	self:_UpdateHandle(true)
+	-- the window grows frame by frame (not as one jump), so rows reflow with it and nothing looks stretched
+	local fromSize = Vector2.new(self.Holder.AbsoluteSize.X, self.Holder.AbsoluteSize.Y) / self.Host:GetScale()
+	local fromPos = Vector2.new(self.Holder.Position.X.Offset, self.Holder.Position.Y.Offset)
+	local toSize, toPos = self.Size, self.Offset
+	self._animToken = (self._animToken or 0) + 1
+	local token = self._animToken
+	local t0 = os.clock()
+	local dur = 0.42
+	self._expanding = true
+	local conn
+	conn = RunService.RenderStepped:Connect(function()
+		if self.Destroyed or self._animToken ~= token then conn:Disconnect(); return end
+		local a = Util.Clamp((os.clock() - t0) / dur, 0, 1)
+		local e = 1 - (1 - a) ^ 4                      -- ease out quart
+		local sz = fromSize:Lerp(toSize, e)
+		local ps = fromPos:Lerp(toPos, e)
+		self.Holder.Size = UDim2.fromOffset(sz.X, sz.Y)
+		self.Holder.Position = UDim2.new(0.5, ps.X, 0.5, ps.Y)
+		if self.Handle then self.Handle.Position = UDim2.new(0.5, ps.X, 0.5, ps.Y + sz.Y / 2 + 7) end
+		if a >= 1 then
+			conn:Disconnect()
+			self._expanding = false
+			self.Holder.Size = UDim2.fromOffset(toSize.X, toSize.Y)
+			self.Holder.Position = UDim2.new(0.5, toPos.X, 0.5, toPos.Y)
+			self:_UpdateHandle(true)
+		end
+	end)
 	self:_OnResized()
 	Icons.Apply(Util.Part(self.MaxBtn, "Image"), self.Fullscreen and "minimize" or "maximize", 16, "SubText")
 	self.ResizeGrip.Visible = self.Resizable and not self.Fullscreen
@@ -3334,12 +3898,15 @@ end
 
 function Window:SetToggleKey(key) self.ToggleKey = Util.ParseKeyCode(key) or self.ToggleKey end
 function Window:SetTheme(name) return Theme.Set(name) end
+function Window:SetMode(mode) return Theme.SetMode(mode) end
+function Window:GetMode() return Theme.Mode end
+function Window:ToggleMode() return Vesper:ToggleMode() end
 function Window:Notify(opts) return Vesper:Notify(opts) end
 
 -- ─────────────────────────────────────────────────────────────
 --  Live stat cards  (Tab:Stats)
 -- ─────────────────────────────────────────────────────────────
-local STAT_H = 66
+local STAT_H = 72
 
 local function getPing()
 	local ok, value = pcall(function() return game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue() end)
@@ -3349,9 +3916,9 @@ local function getPing()
 end
 
 local STAT_PRESETS = {
-	FPS     = { Title = "FPS",     Suffix = "Client", Max = 120, Format = "%d", Get = function(w) return w._fps or 60 end },
-	Ping    = { Title = "Ping",    Suffix = "Ms",     Max = 300, Format = "%d", Get = getPing },
-	Players = { Title = "Players", Suffix = "Server", Max = function() return Players.MaxPlayers end, Format = "%d", Get = function() return #Players:GetPlayers() end },
+	FPS     = { Title = "FPS",     Icon = "activity", Suffix = "Client", Max = 120, Format = "%d", Get = function(w) return w._fps or 60 end },
+	Ping    = { Title = "Ping",    Icon = "wifi",     Suffix = "Ms",     Max = 300, Format = "%d", Get = getPing },
+	Players = { Title = "Players", Icon = "users",    Suffix = "Server", Max = function() return Players.MaxPlayers end, Format = "%d", Get = function() return #Players:GetPlayers() end },
 }
 
 function Window:_SetupStats()
@@ -3370,14 +3937,23 @@ function Window:_SetupStats()
 	end))
 end
 
---- Tab:Stats({ "FPS", "Ping", "Players" })  or custom { Title, Suffix, Get = function() return n end, Max = 100, Format = "%d" }
+--- Tab:Stats({ "FPS", "Ping", "Players" })  or custom cards:
+---   { Title, Suffix, Icon, Get = function(window) return n end, Max = 100, Format = "%d", Spark = true, Sweep = false, Color }
+--- Every card counts up smoothly to its value, draws a live bar history and lights up when the value jumps.
+--- Returned objects: :Push(value) (feed it yourself instead of Get), :Scan() (light sweep), :SetTitle(text), :Destroy()
+local SPARK_N, SPARK_W, SPARK_GAP, SPARK_H = 12, 3, 2, 30
+
 function Tab:Stats(list)
 	local window = self.Window
 	list = list or { "FPS", "Ping", "Players" }
 	if self.StatsRow then
 		self.StatsRow:Destroy()
 		for i = #window._stats, 1, -1 do
-			if window._stats[i].Tab == self then table.remove(window._stats, i) end
+			local old = window._stats[i]
+			if old.Tab == self then
+				if old.Smooth then old.Smooth.Destroy() end
+				table.remove(window._stats, i)
+			end
 		end
 	end
 	local gap = 8
@@ -3395,51 +3971,103 @@ function Tab:Stats(list)
 		Theme.Bind(card, { BackgroundColor3 = "Card" })
 		Util.Corner(card, 12)
 		Util.Shade(card, 90, 0.08)
-		Shadow.Edge(card, { Inset = 8, Alpha = 0.82 })
-		Util.FadeLine(card, { Position = UDim2.new(0, 0, 0, 0), Size = UDim2.new(1, 0, 0, 1), Strength = 0.3, ZIndex = 3 })
-		local bar = New("Frame", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.fromScale(0, 0.5), Size = UDim2.fromOffset(3, 30), BackgroundColor3 = WHITE, Parent = card })
+		Edge.Attach(card, "Card", { Radius = 12, Inset = 8, ShadowAlpha = 0.82, Alpha = 0.45, ZIndex = 4 })
+		local colorToken = def.Color and function() return def.Color end or "Accent"
+		local bar = New("Frame", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.fromScale(0, 0.5), Size = UDim2.fromOffset(3, 0), BackgroundColor3 = WHITE, Parent = card })
 		Util.Corner(bar, 2)
-		Theme.AccentGradient(bar, 90)
-		local title = New("TextLabel", { Weight = "Medium", TextSize = 11, Position = UDim2.fromOffset(14, 8), Size = UDim2.new(1, -60, 0, 13), TextTruncate = Enum.TextTruncate.AtEnd, Parent = card })
-		Theme.Bind(title, { TextColor3 = "Muted" })
+		if def.Color then bar.BackgroundColor3 = def.Color else Theme.AccentGradient(bar, 90) end
+		Util.Tween(bar, 0.6, { Size = UDim2.fromOffset(3, 32) }, "Back")
+
+		local titleX = 14
+		if def.Icon then
+			Util.Icon(card, def.Icon, 12, "Muted", { Position = UDim2.fromOffset(14, 8) })
+			titleX = 31
+		end
+		local title = New("TextLabel", { Weight = "Medium", TextSize = 11.5, Position = UDim2.fromOffset(titleX, 8), Size = UDim2.new(1, -(titleX + 8), 0, 14), TextTruncate = Enum.TextTruncate.AtEnd, Parent = card })
+		Theme.Bind(title, { TextColor3 = "SubText" })
 		Util.SetText(title, def.Title or "Stat")
-		local value = New("TextLabel", { Weight = "SemiBold", TextSize = 22, Position = UDim2.fromOffset(14, 20), Size = UDim2.new(1, -60, 0, 26), Text = "–", Parent = card })
+		local value = New("TextLabel", { Weight = "SemiBold", TextSize = 23, Position = UDim2.fromOffset(14, 20), Size = UDim2.new(1, -SPARK_N * (SPARK_W + SPARK_GAP) - 22, 0, 27), Text = "–", Parent = card })
 		Theme.Bind(value, { TextColor3 = "Text" })
-		local suffix = New("TextLabel", { TextSize = 11, Position = UDim2.fromOffset(14, 47), Size = UDim2.new(1, -60, 0, 13), TextTruncate = Enum.TextTruncate.AtEnd, Parent = card })
+		local suffix = New("TextLabel", { TextSize = 11.5, Position = UDim2.fromOffset(14, 47), Size = UDim2.new(1, -SPARK_N * (SPARK_W + SPARK_GAP) - 22, 0, 14), TextTruncate = Enum.TextTruncate.AtEnd, Parent = card })
 		Theme.Bind(suffix, { TextColor3 = "Muted" })
 		Util.SetText(suffix, def.Suffix or "")
 
+		-- live bar history (newest on the right)
 		local bars = {}
-		for b = 1, 3 do
-			local f = New("Frame", { AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -14 - (3 - b) * 8, 1, -14), Size = UDim2.fromOffset(3, 10), BackgroundColor3 = WHITE, Parent = card })
+		local sparkOn = def.Spark ~= false
+		for b = 1, SPARK_N do
+			local f = New("Frame", {
+				AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -14 - (SPARK_N - b) * (SPARK_W + SPARK_GAP), 1, -12), Size = UDim2.fromOffset(SPARK_W, 3),
+				BackgroundColor3 = WHITE, Visible = sparkOn, Parent = card,
+			})
 			Util.Corner(f, 2)
-			Theme.Bind(f, { BackgroundColor3 = b == 3 and "Accent" or "SubText" })
-			f.BackgroundTransparency = b == 3 and 0.05 or 0.5
+			Theme.Bind(f, { BackgroundColor3 = b == SPARK_N and colorToken or "SubText" })
+			f.BackgroundTransparency = b == SPARK_N and 0.02 or (0.8 - 0.35 * (b / SPARK_N))
 			bars[b] = f
 		end
 
 		local history = {}
-		local stat = { Tab = self, Card = card }
-		function stat:Update()
-			local ok, v = pcall(def.Get, window)
-			if not ok or type(v) ~= "number" then return end
-			local max = type(def.Max) == "function" and def.Max() or def.Max or 100
-			table.insert(history, v)
-			while #history > 3 do table.remove(history, 1) end
-			value.Text = string.format(def.Format or "%d", v)
-			for b = 1, 3 do
-				local sample = history[#history - 3 + b] or history[1] or v
-				local ratio = Util.Clamp(sample / math.max(max, 1), 0, 1)
-				Util.Tween(bars[b], 0.35, { Size = UDim2.fromOffset(3, 8 + math.floor(ratio * 26)) }, "Out")
+		local last
+		local stat = { Tab = self, Card = card, Value = 0 }
+		local fmt = def.Format or "%d"
+		stat.Smooth = Util.Smoother(0, 9, function(v)
+			value.Text = string.format(fmt, v)
+		end)
+
+		local function draw()
+			local max = type(def.Max) == "function" and def.Max() or def.Max
+			if not max then
+				max = 1
+				for _, v in history do max = math.max(max, v) end
+			end
+			for b = 1, SPARK_N do
+				local sample = history[#history - SPARK_N + b]
+				local ratio = sample and Util.Clamp(sample / math.max(max, 1), 0, 1) or 0
+				Util.Tween(bars[b], 0.45, { Size = UDim2.fromOffset(SPARK_W, sample and (4 + math.floor(ratio * (SPARK_H - 4))) or 3) }, "Out")
 			end
 		end
+
+		function stat:Push(v)
+			if type(v) ~= "number" then return end
+			table.insert(history, v)
+			while #history > SPARK_N do table.remove(history, 1) end
+			stat.Value = v
+			stat.Smooth.Set(v, last == nil)
+			draw()
+			-- light up when the value jumps
+			if last ~= nil then
+				local max = type(def.Max) == "function" and def.Max() or def.Max or math.max(math.abs(last), 1)
+				if math.abs(v - last) / math.max(max, 1) > 0.06 then
+					Util.Tween(value, 0.12, { TextColor3 = Theme.Resolve(def.Color and function() return def.Color end or "Accent") }, "Quad")
+					task.delay(0.35, function()
+						if value.Parent then Util.Tween(value, 0.5, { TextColor3 = Theme.Resolve("Text") }, "Quad") end
+					end)
+				end
+			end
+			last = v
+		end
+		function stat:Update()
+			if not def.Get then return end
+			local ok, v = pcall(def.Get, window)
+			if ok then stat:Push(v) end
+		end
+		function stat:Scan()
+			Fx.Sheen(card, { Color = def.Color or "Accent", Radius = UDim.new(0, 12), Alpha = 0.7, Duration = 0.9 })
+		end
+		function stat:SetTitle(text) Util.SetText(title, text) end
+		function stat:Destroy()
+			stat.Smooth.Destroy()
+			local at = table.find(window._stats, stat)
+			if at then table.remove(window._stats, at) end
+			card:Destroy()
+		end
 		stat:Update()
+		if def.Sweep then stat:Scan() end
 		table.insert(window._stats, stat)
 		objects[i] = stat
 	end
 	return objects
 end
-
 -- ─────────────────────────────────────────────────────────────
 --  Global search
 --  Every tab, section and control registers itself in window._index. The search box
@@ -3615,7 +4243,6 @@ function Window:_SetupSearch()
 	Theme.Bind(canvas, { BackgroundColor3 = "Popup" })
 	Util.Shade(canvas, 90, 0.07)
 	local pop = New("UIScale", { Scale = 0.95, Parent = holder })
-	Util.FadeLine(canvas, { Position = UDim2.new(0, 0, 0, 0), Size = UDim2.new(1, 0, 0, 1), Strength = 0.8, Token = "Accent", ZIndex = 6, Thickness = 1 })
 
 	local header = New("TextLabel", { Weight = "SemiBold", TextSize = 11, Position = UDim2.fromOffset(14, 0), Size = UDim2.new(1, -28, 0, HEAD_H), Text = "", Parent = canvas })
 	Theme.Bind(header, { TextColor3 = "Muted" })
@@ -3957,20 +4584,21 @@ function Elements.Row(container, opts, rightW, rightH, interactive)
 	Theme.Bind(card, { BackgroundColor3 = "Card" })
 	Util.Corner(card, 12)
 	local shade = Util.Shade(card, 90, 0.07)
-	local depth = Shadow.Edge(card, { Inset = 9, Alpha = 0.84 })
-	local topLine = Util.FadeLine(card, { Position = UDim2.new(0, 0, 0, 0), Size = UDim2.new(1, 0, 0, 1), Strength = 0.26, ZIndex = 4 })
+	local edge = Edge.Attach(card, "Card", { Radius = 12, Inset = 9, ShadowAlpha = 0.84, Alpha = 0.42, Mode = opts.Edge, ZIndex = 4 })
+	local depth = edge.Contact
+	if interactive then Util.PressScale(card, card, 0.988) end
 
 	local body = New("Frame", { Name = "Body", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, Active = false, Parent = card })
 	local pad = Util.Padding(body, 8, 16, 8, 16)
 	local minC = New("UISizeConstraint", { Parent = body })
 
-	local row = { Frame = card, Body = body, Container = container, Shade = shade, Depth = depth, TopLine = topLine }
+	local row = { Frame = card, Body = body, Container = container, Shade = shade, Depth = depth, Edge = edge }
 	if opts.Icon then
-		row.Icon = Util.Icon(body, opts.Icon, 16, "SubText", { Position = UDim2.fromOffset(0, 0) })
+		row.Icon = Util.Icon(body, opts.Icon, 18, "SubText", { Position = UDim2.fromOffset(0, 0) })
 	end
 	local reserve = (rightW and rightW > 0) and (rightW + 12) or 0
 	local left = New("Frame", { Name = "Left", BackgroundTransparency = 1, Size = UDim2.new(1, -reserve, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, Parent = body })
-	local leftPad = Util.Padding(left, 0, 0, 0, opts.Icon and 26 or 0)
+	local leftPad = Util.Padding(left, 0, 0, 0, opts.Icon and 29 or 0)
 	Util.List(left, 2)
 	row.Left = left
 
@@ -3999,21 +4627,29 @@ function Elements.Row(container, opts, rightW, rightH, interactive)
 	local titleH = 17
 
 	--- sizes that depend on density and on whether there is a description
+	--  A row with only a title gets a bigger title and a taller row (there is no sub text to explain it);
+	--  a row with a description keeps a slightly smaller title and a larger, easier to read sub text.
 	local function fit()
 		local compact = metrics.compact
-		local padV = compact and 6 or 8
-		metrics.padH = compact and 12 or 16
-		titleH = compact and 16 or 17
-		row.TitleLabel.TextSize = compact and 13 or 14
-		row.DescLabel.TextSize = compact and 10 or 11
+		local hasDesc = row.DescLabel.Visible
+		local padV = compact and 7 or 10
+		metrics.padH = compact and 13 or 18
+		local titleSize = hasDesc and (compact and 13 or 14.5) or (compact and 14.5 or 16)
+		titleH = math.floor(titleSize * 1.22 + 0.5)
+		row.TitleLabel.TextSize = titleSize
+		row.TitleLabel.Size = UDim2.new(1, 0, 0, titleH)
+		row.DescLabel.TextSize = compact and 11.5 or 12.5
+		row.DescLabel.Size = UDim2.new(1, 0, 0, math.floor(row.DescLabel.TextSize * 1.2 + 0.5))
 		pad.PaddingTop, pad.PaddingBottom = UDim.new(0, padV), UDim.new(0, padV)
 		pad.PaddingLeft, pad.PaddingRight = UDim.new(0, metrics.padH), UDim.new(0, metrics.padH)
 		local contentH = math.max(rightH or 0, titleH)
-		minC.MinSize = Vector2.new(0, contentH + padV * 2)
-		local hasDesc = row.DescLabel.Visible
-		local topPad = (not hasDesc and contentH > titleH) and math.floor((contentH - titleH) / 2) or 0
+		local minH = contentH + padV * 2
+		if not hasDesc then minH = math.max(minH, compact and 42 or 48) end
+		minC.MinSize = Vector2.new(0, minH)
+		local topPad = 0
+		if not hasDesc then topPad = math.max(0, math.floor((minH - padV * 2 - titleH) / 2)) end
 		leftPad.PaddingTop = UDim.new(0, topPad)
-		if row.Icon then row.Icon.Position = UDim2.fromOffset(0, topPad + math.floor((titleH - 16) / 2)) end
+		if row.Icon then row.Icon.Position = UDim2.fromOffset(0, topPad + math.floor((titleH - 18) / 2)) end
 	end
 	row.Fit = fit
 
@@ -4113,108 +4749,211 @@ end
 --  Reusable control builders
 -- ─────────────────────────────────────────────────────────────
 
---- Switch (pill with knob). Returns { Frame, Set(on, instant), Press(down), Burst() }
-function Elements.MakeSwitch(parent, w, h)
-	w, h = w or 40, h or 22
+--- Eases a number towards its target every frame (used by sliders so dragging feels silky).
+--- apply(value) is called with the smoothed value. Returns { Set(target, instant), Value, Target, Destroy }.
+function Util.Smoother(initial, speed, apply)
+	local sm = { Value = initial, Target = initial }
+	local conn
+	local function stop()
+		if conn then conn:Disconnect(); conn = nil end
+	end
+	function sm.Set(target, instant)
+		sm.Target = target
+		if instant then
+			sm.Value = target
+			stop()
+			apply(target)
+			return
+		end
+		if conn then return end
+		conn = RunService.RenderStepped:Connect(function(dt)
+			local diff = sm.Target - sm.Value
+			if math.abs(diff) < 0.0003 then
+				sm.Value = sm.Target
+				stop()
+				apply(sm.Value)
+				return
+			end
+			sm.Value += diff * (1 - math.exp(-(speed or 20) * dt))
+			apply(sm.Value)
+		end)
+	end
+	function sm.Destroy() stop() end
+	return sm
+end
+
+--- Switch: a pill with a big sphere knob that fills the track. The sphere can carry a Lucide icon.
+--- o = { Icon (shown on the sphere when ON), IconOff (shown when OFF) }
+--- Returns { Frame, On, Set(on, instant), Press(down), Burst() }
+function Elements.MakeSwitch(parent, w, h, o)
+	o = o or {}
+	w, h = w or 56, h or 30
 	local pad = 3
 	local knobSize = h - pad * 2
-	local track = New("Frame", { Name = "Switch", AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.fromScale(1, 0.5), Size = UDim2.fromOffset(w, h), BackgroundColor3 = WHITE, Parent = parent })
+	local squash = 7                                  -- the knob stretches this much while pressed
+
+	local track = New("Frame", {
+		Name = "Switch", AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.fromScale(1, 0.5), Size = UDim2.fromOffset(w, h),
+		BackgroundColor3 = WHITE, Parent = parent,
+	})
 	Theme.Bind(track, { BackgroundColor3 = "Input" })
 	Util.Corner(track, h)
 	Util.Shade(track, 90, 0.12)
-	local fill = New("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, BackgroundTransparency = 1, Parent = track })
+	local fill = New("Frame", { Name = "Fill", Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, BackgroundTransparency = 1, Parent = track })
 	Util.Corner(fill, h)
 	Theme.AccentGradient(fill, 0)
-	local knob = New("Frame", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, pad, 0.5, 0), Size = UDim2.fromOffset(knobSize, knobSize), BackgroundColor3 = WHITE, ZIndex = 2, Parent = track })
-	Theme.Bind(knob, { BackgroundColor3 = "Muted" })
-	Util.Corner(knob, h)
-	local core = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(0, 0), BackgroundColor3 = WHITE, Parent = knob })
-	Util.Corner(core, h)
-	Theme.AccentGradient(core, 45)
+	Edge.Attach(track, "Chip", { Radius = h, Alpha = 0.5, Contact = false, ZIndex = 4 })
 
-	local sw = { Frame = track, On = false }
-	local function knobX(on) return on and (w - knobSize - pad) or pad end
+	-- soft glow that follows the knob while the switch is on
+	local glow = New("Frame", {
+		Name = "Glow", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0, pad + knobSize / 2, 0.5, 0), Size = UDim2.fromOffset(knobSize + 12, knobSize + 12),
+		BackgroundColor3 = WHITE, BackgroundTransparency = 1, ZIndex = 1, Parent = track,
+	})
+	Util.Corner(glow, h)
+	Theme.Bind(glow, { BackgroundColor3 = "Accent" })
+
+	local knob = New("Frame", {
+		Name = "Knob", AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, pad, 0.5, 0), Size = UDim2.fromOffset(knobSize, knobSize),
+		BackgroundColor3 = WHITE, ZIndex = 3, Parent = track,
+	})
+	Theme.Bind(knob, { BackgroundColor3 = "SubText" })
+	Util.Corner(knob, h)
+	Util.Shade(knob, 90, 0.1)
+	local knobShadow = New("Frame", {
+		Name = "KnobShadow", AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, pad, 0.5, 1.5), Size = UDim2.fromOffset(knobSize, knobSize),
+		BackgroundColor3 = BLACK, BackgroundTransparency = 0.72, ZIndex = 2, Parent = track,
+	})
+	Util.Corner(knobShadow, h)
+
+	local iconSize = math.max(math.floor(knobSize * 0.56), 10)
+	local function knobIcon(name, token)
+		if not name then return nil end
+		return Util.Icon(knob, name, iconSize, token, { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), ImageTransparency = 1, ZIndex = 5 })
+	end
+	local iconOn = knobIcon(o.Icon, "Accent")
+	local iconOff = knobIcon(o.IconOff, "Input")
+
+	local sw = { Frame = track, On = false, Knob = knob }
+	local pressed = false
+	local function knobW() return knobSize + (pressed and squash or 0) end
+	local function knobX(on) return on and (w - knobW() - pad) or pad end
+
+	local function place(instant, time, ease)
+		local x = knobX(sw.On)
+		local size = UDim2.fromOffset(knobW(), knobSize)
+		local pos = UDim2.new(0, x, 0.5, 0)
+		local sPos = UDim2.new(0, x, 0.5, 1.5)
+		local glowPos = UDim2.new(0, x + knobW() / 2, 0.5, 0)
+		if instant then
+			knob.Position, knob.Size, knobShadow.Position, knobShadow.Size, glow.Position = pos, size, sPos, size, glowPos
+		else
+			Util.Tween(knob, time or 0.34, { Position = pos, Size = size }, ease or "Back")
+			Util.Tween(knobShadow, time or 0.34, { Position = sPos, Size = size }, ease or "Back")
+			Util.Tween(glow, time or 0.34, { Position = glowPos }, ease or "Back")
+		end
+	end
+
 	function sw.Set(on, instant)
 		sw.On = on
-		local pos = UDim2.new(0, knobX(on), 0.5, 0)
-		local dot = UDim2.fromOffset(on and math.max(knobSize - 8, 4) or 0, on and math.max(knobSize - 8, 4) or 0)
+		place(instant)
+		local fillT, glowT = on and 0 or 1, on and 0.8 or 1
+		local knobColor = on and WHITE or Theme.Current.SubText
+		local onA, offA = on and 0 or 1, on and 1 or 0
 		if instant then
-			knob.Position = pos
-			core.Size = dot
-			fill.BackgroundTransparency = on and 0 or 1
-			knob.BackgroundColor3 = on and WHITE or Theme.Current.Muted
+			fill.BackgroundTransparency, glow.BackgroundTransparency = fillT, glowT
+			knob.BackgroundColor3 = knobColor
+			if iconOn then iconOn.ImageTransparency = onA end
+			if iconOff then iconOff.ImageTransparency = offA end
 		else
-			Util.Tween(knob, 0.3, { Position = pos }, "Back")
-			Util.Tween(core, 0.3, { Size = dot }, on and "Back" or "Quad")
-			Util.Tween(fill, 0.22, { BackgroundTransparency = on and 0 or 1 }, "Quad")
-			Util.Tween(knob, 0.22, { BackgroundColor3 = on and WHITE or Theme.Current.Muted }, "Quad")
+			Util.Tween(fill, 0.26, { BackgroundTransparency = fillT }, "Quad")
+			Util.Tween(glow, 0.3, { BackgroundTransparency = glowT }, "Quad")
+			Util.Tween(knob, 0.22, { BackgroundColor3 = knobColor }, "Quad")
+			if iconOn then
+				if on then iconOn.Rotation = -70 end
+				Util.Tween(iconOn, 0.3, { ImageTransparency = onA, Rotation = 0 }, on and "Back" or "Quad")
+			end
+			if iconOff then
+				if not on then iconOff.Rotation = 70 end
+				Util.Tween(iconOff, 0.3, { ImageTransparency = offA, Rotation = 0 }, not on and "Back" or "Quad")
+			end
 		end
-		Theme.Registry[knob].BackgroundColor3 = function(t) return sw.On and WHITE or t.Muted end
+		Theme.Registry[knob].BackgroundColor3 = function(t) return sw.On and WHITE or t.SubText end
 	end
 	function sw.Press(down)
-		Util.Tween(knob, 0.12, { Size = UDim2.fromOffset(down and knobSize + 4 or knobSize, knobSize) }, "Quad")
+		if pressed == down then return end
+		pressed = down
+		place(false, down and 0.12 or 0.3, down and "Quad" or "Back")
 	end
 	function sw.Burst()
-		Fx.Burst(track, { X = knobX(sw.On) + knobSize / 2, Y = h / 2, Count = 6, Distance = 18, Size = 3, Duration = 0.45 })
+		Fx.Burst(track, { X = knobX(sw.On) + knobSize / 2, Y = h / 2, Count = 6, Distance = 20, Size = 3, Duration = 0.45 })
 	end
 	return sw
 end
 
---- Slider core: track + fill + thumb (with halo and a value bubble while dragging) + value label.
---- o = { Min, Max, Default, Step, Suffix, OnChange(value), OnEnd(value) }
+--- Slider core: track + glowing fill + sphere thumb (halo, optional icon, value bubble while dragging) + value label.
+--- The thumb eases towards the pointer every frame, so fast drags still look smooth.
+--- o = { Min, Max, Default, Step, Suffix, Icon, OnChange(value), OnEnd(value) }
 function Elements.MakeSlider(parent, o)
 	local min, max, step = o.Min or 0, o.Max or 100, o.Step or 1
 	local holder = New("Frame", { Name = "Slider", BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1), Parent = parent })
 	local valueLabel = New("TextLabel", {
-		Weight = "Medium", TextSize = 11, AnchorPoint = Vector2.new(1, 0), Position = UDim2.fromScale(1, 0), Size = UDim2.new(1, 0, 0, 12),
+		Weight = "SemiBold", TextSize = 12, AnchorPoint = Vector2.new(1, 0), Position = UDim2.fromScale(1, 0), Size = UDim2.new(1, 0, 0, 14),
 		TextXAlignment = Enum.TextXAlignment.Right, Parent = holder,
 	})
-	Theme.Bind(valueLabel, { TextColor3 = "Muted" })
+	Theme.Bind(valueLabel, { TextColor3 = "SubText" })
 
-	local hit = New("TextButton", { Name = "Hit", AnchorPoint = Vector2.new(0, 1), Position = UDim2.fromScale(0, 1), Size = UDim2.new(1, 0, 0, 22), Parent = holder })
-	local trackInset = 8
-	local track = New("Frame", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, trackInset, 0.5, 0), Size = UDim2.new(1, -trackInset * 2, 0, 4), BackgroundColor3 = WHITE, Parent = hit })
+	local THUMB = o.Icon and 22 or 18
+	local hit = New("TextButton", { Name = "Hit", AnchorPoint = Vector2.new(0, 1), Position = UDim2.fromScale(0, 1), Size = UDim2.new(1, 0, 0, 26), Parent = holder })
+	local trackInset = THUMB / 2 + 2
+	local track = New("Frame", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, trackInset, 0.5, 0), Size = UDim2.new(1, -trackInset * 2, 0, 6), BackgroundColor3 = WHITE, Parent = hit })
 	Theme.Bind(track, { BackgroundColor3 = "Input" })
-	Util.Corner(track, 3)
-	Util.Shade(track, 90, 0.14)
+	Util.Corner(track, 6)
+	Util.Shade(track, 90, 0.16)
 	local fill = New("Frame", { Size = UDim2.fromScale(0, 1), BackgroundColor3 = WHITE, Parent = track })
-	Util.Corner(fill, 3)
+	Util.Corner(fill, 6)
 	Theme.AccentGradient(fill, 0)
-	local tick = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Size = UDim2.fromOffset(1, 9), BackgroundColor3 = WHITE, BackgroundTransparency = 0.5, Visible = false, Parent = track })
+	local tick = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Size = UDim2.fromOffset(2, 10), BackgroundColor3 = WHITE, BackgroundTransparency = 0.55, Visible = false, Parent = track })
 	Theme.Bind(tick, { BackgroundColor3 = "Muted" })
-	local thumb = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0, 0.5), Size = UDim2.fromOffset(14, 14), BackgroundColor3 = WHITE, ZIndex = 3, Parent = track })
+	Util.Corner(tick, 1)
+
+	local thumb = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0, 0.5), Size = UDim2.fromOffset(THUMB, THUMB), BackgroundColor3 = WHITE, ZIndex = 3, Parent = track })
 	Theme.Bind(thumb, { BackgroundColor3 = "Text" })
-	Util.Corner(thumb, 14)
-	local halo = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(14, 14), BackgroundColor3 = WHITE, BackgroundTransparency = 1, ZIndex = 2, Parent = thumb })
+	Util.Corner(thumb, THUMB)
+	local thumbShadow = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 0.5, 1.5), Size = UDim2.fromScale(1, 1), BackgroundColor3 = BLACK, BackgroundTransparency = 0.7, ZIndex = 1, Parent = thumb })
+	Util.Corner(thumbShadow, THUMB)
+	local halo = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(THUMB, THUMB), BackgroundColor3 = WHITE, BackgroundTransparency = 1, ZIndex = 0, Parent = thumb })
 	Theme.Bind(halo, { BackgroundColor3 = "Accent" })
-	Util.Corner(halo, 30)
-	local core = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(6, 6), BackgroundColor3 = WHITE, ZIndex = 4, Parent = thumb })
-	Util.Corner(core, 6)
-	Theme.AccentGradient(core, 45)
+	Util.Corner(halo, 40)
+	if o.Icon then
+		Util.Icon(thumb, o.Icon, 12, "Accent", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), ZIndex = 4 })
+	else
+		local core = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(8, 8), BackgroundColor3 = WHITE, ZIndex = 4, Parent = thumb })
+		Util.Corner(core, 8)
+		Theme.AccentGradient(core, 45)
+	end
 
 	local bubble = New("Frame", {
-		AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 0, -9), Size = UDim2.new(0, 0, 0, 20), AutomaticSize = Enum.AutomaticSize.X,
+		AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 0, -9), Size = UDim2.new(0, 0, 0, 22), AutomaticSize = Enum.AutomaticSize.X,
 		BackgroundColor3 = WHITE, BackgroundTransparency = 1, ZIndex = 6, Parent = thumb,
 	})
 	Theme.Bind(bubble, { BackgroundColor3 = "Popup" })
-	Util.Corner(bubble, 7)
-	Util.Padding(bubble, 0, 8, 0, 8)
-	Shadow.Edge(bubble, { Inset = 3, Alpha = 0.7 })
-	local bubbleText = New("TextLabel", { Weight = "SemiBold", TextSize = 11, Size = UDim2.new(0, 0, 1, 0), AutomaticSize = Enum.AutomaticSize.X, TextTransparency = 1, ZIndex = 7, Parent = bubble })
+	Util.Corner(bubble, 8)
+	Util.Padding(bubble, 0, 9, 0, 9)
+	Edge.Attach(bubble, "Chip", { Radius = 8, Alpha = 0.7, Contact = false, ZIndex = 8 })
+	local bubbleText = New("TextLabel", { Weight = "SemiBold", TextSize = 12, Size = UDim2.new(0, 0, 1, 0), AutomaticSize = Enum.AutomaticSize.X, TextTransparency = 1, ZIndex = 7, Parent = bubble })
 	Theme.Bind(bubbleText, { TextColor3 = "Text" })
 
 	local s = { Value = min, Min = min, Max = max, Holder = holder, Hit = hit, Enabled = true }
 	local lastTick = 0
 
+	local sm = Util.Smoother(0, 24, function(r)
+		fill.Size = UDim2.fromScale(r, 1)
+		thumb.Position = UDim2.fromScale(r, 0.5)
+	end)
+
 	local function render(value, instant)
 		local ratio = max > min and (value - min) / (max - min) or 0
-		local fillSize, pos = UDim2.fromScale(ratio, 1), UDim2.fromScale(ratio, 0.5)
-		if instant then
-			fill.Size, thumb.Position = fillSize, pos
-		else
-			Util.Tween(fill, 0.08, { Size = fillSize }, "Quad")
-			Util.Tween(thumb, 0.08, { Position = pos }, "Quad")
-		end
+		sm.Set(ratio, instant)
 		local text = Util.FormatNumber(value, step) .. (o.Suffix or "")
 		valueLabel.Text = text
 		bubbleText.Text = text
@@ -4248,8 +4987,15 @@ function Elements.MakeSlider(parent, o)
 	local function bubbleShow(show)
 		Util.Tween(bubble, 0.16, { BackgroundTransparency = show and 0.02 or 1 }, "Quad")
 		Util.Tween(bubbleText, 0.16, { TextTransparency = show and 0 or 1 }, "Quad")
-		Util.Tween(bubble, 0.22, { Position = UDim2.new(0.5, 0, 0, show and -11 or -6) }, "Out")
+		Util.Tween(bubble, 0.26, { Position = UDim2.new(0.5, 0, 0, show and -12 or -6) }, "Out")
 	end
+
+	hit.MouseEnter:Connect(function()
+		if s.Enabled then Util.Tween(halo, 0.2, { Size = UDim2.fromOffset(THUMB + 10, THUMB + 10), BackgroundTransparency = 0.88 }, "Out") end
+	end)
+	hit.MouseLeave:Connect(function()
+		Util.Tween(halo, 0.25, { Size = UDim2.fromOffset(THUMB, THUMB), BackgroundTransparency = 1 }, "Quad")
+	end)
 
 	Util.Drag(hit, function(pos)
 		if not s.Enabled then return end
@@ -4262,14 +5008,14 @@ function Elements.MakeSlider(parent, o)
 		end
 	end, function()
 		if not s.Enabled then return false end
-		Util.Tween(thumb, 0.18, { Size = UDim2.fromOffset(17, 17) }, "Back")
-		Util.Tween(halo, 0.2, { Size = UDim2.fromOffset(32, 32), BackgroundTransparency = 0.82 }, "Out")
+		Util.Tween(thumb, 0.2, { Size = UDim2.fromOffset(THUMB + 4, THUMB + 4) }, "Back")
+		Util.Tween(halo, 0.22, { Size = UDim2.fromOffset(THUMB + 16, THUMB + 16), BackgroundTransparency = 0.8 }, "Out")
 		Theme.Bind(valueLabel, { TextColor3 = "Text" })
 		bubbleShow(true)
 	end, function()
-		Util.Tween(thumb, 0.22, { Size = UDim2.fromOffset(14, 14) }, "Quad")
-		Util.Tween(halo, 0.25, { Size = UDim2.fromOffset(14, 14), BackgroundTransparency = 1 }, "Quad")
-		Theme.Bind(valueLabel, { TextColor3 = "Muted" })
+		Util.Tween(thumb, 0.26, { Size = UDim2.fromOffset(THUMB, THUMB) }, "Back")
+		Util.Tween(halo, 0.28, { Size = UDim2.fromOffset(THUMB, THUMB), BackgroundTransparency = 1 }, "Quad")
+		Theme.Bind(valueLabel, { TextColor3 = "SubText" })
 		bubbleShow(false)
 		if o.OnEnd then o.OnEnd(s.Value) end
 	end)
@@ -4280,11 +5026,11 @@ function Elements.MakeSlider(parent, o)
 		tick.Position = UDim2.fromScale(ratio, 0.5)
 		tick.Visible = true
 	end
+	function s.Destroy() sm.Destroy() end
 
 	s.Set(o.Default or min, true, true)
 	return s
 end
-
 -- ─────────────────────────────────────────────────────────────
 --  Button
 -- ─────────────────────────────────────────────────────────────
@@ -4360,10 +5106,20 @@ end
 
 -- ─────────────────────────────────────────────────────────────
 --  Toggle
+--  KnobIcon    Lucide icon shown on the sphere while ON (default: the row's Icon, or "check"; false = none)
+--  KnobIconOff Lucide icon shown on the sphere while OFF (default none)
 -- ─────────────────────────────────────────────────────────────
+local function knobIcons(opts, fallback)
+	local on = opts.KnobIcon
+	if on == nil then on = opts.Icon or fallback end
+	if on == false then on = nil end
+	return on, opts.KnobIconOff or nil
+end
+
 Elements.Create.Toggle = function(container, opts)
-	local row = Elements.Row(container, opts, 42, 22, true)
-	local sw = Elements.MakeSwitch(row.Right, 40, 22)
+	local row = Elements.Row(container, opts, 60, 30, true)
+	local iconOn, iconOff = knobIcons(opts, "check")
+	local sw = Elements.MakeSwitch(row.Right, 56, 30, { Icon = iconOn, IconOff = iconOff })
 	local obj = { Type = "Toggle", Value = opts.Default == true }
 
 	function obj:Set(value, silent)
@@ -4393,14 +5149,13 @@ Elements.Create.Toggle = function(container, opts)
 	obj.SetConfig = function(v) obj:Set(v == true) end
 	return Elements.Finish(obj, container, row, "element", opts)
 end
-
 -- ─────────────────────────────────────────────────────────────
 --  Checkbox  (Style = "Square" | "Round")
 -- ─────────────────────────────────────────────────────────────
 Elements.Create.Checkbox = function(container, opts)
-	local row = Elements.Row(container, opts, 24, 24, true)
+	local row = Elements.Row(container, opts, 28, 28, true)
 	local round = opts.Style == "Round"
-	local size = 22
+	local size = 26
 	local radius = round and size or 7
 	local obj = { Type = "Checkbox", Value = opts.Default == true }
 
@@ -4408,22 +5163,23 @@ Elements.Create.Checkbox = function(container, opts)
 	Theme.Bind(box, { BackgroundColor3 = "Input" })
 	Util.Corner(box, radius)
 	Util.Shade(box, 90, 0.14)
-	Shadow.Edge(box, { Inset = 3, Alpha = 0.8 })
+	Edge.Attach(box, "Chip", { Radius = radius, Alpha = 0.55, Contact = false, ZIndex = 4 })
 	local fill = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(0, 0), BackgroundColor3 = WHITE, BackgroundTransparency = 1, Parent = box })
 	Util.Corner(fill, radius)
 	Theme.AccentGradient(fill, 45)
-	local mark = Util.Icon(box, "check", 14, "AccentText", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(4, 4), ImageTransparency = 1, ZIndex = 3 })
+	local markSize = 16
+	local mark = Util.Icon(box, opts.CheckIcon or "check", markSize, "AccentText", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(4, 4), ImageTransparency = 1, ZIndex = 3 })
 
 	local function paint(instant)
 		local on = obj.Value
 		local fillSize = UDim2.fromOffset(on and size or 0, on and size or 0)
-		local markSize = UDim2.fromOffset(on and 14 or 4, on and 14 or 4)
+		local markSz = UDim2.fromOffset(on and markSize or 4, on and markSize or 4)
 		if instant then
 			fill.Size, fill.BackgroundTransparency = fillSize, on and 0 or 1
-			mark.Size, mark.ImageTransparency = markSize, on and 0 or 1
+			mark.Size, mark.ImageTransparency = markSz, on and 0 or 1
 		else
 			Util.Tween(fill, 0.26, { Size = fillSize, BackgroundTransparency = on and 0 or 1 }, on and "Back" or "Quad")
-			Util.Tween(mark, 0.3, { Size = markSize, ImageTransparency = on and 0 or 1 }, on and "Back" or "Quad")
+			Util.Tween(mark, 0.3, { Size = markSz, ImageTransparency = on and 0 or 1 }, on and "Back" or "Quad")
 		end
 	end
 
@@ -4460,10 +5216,10 @@ end
 --  Slider
 -- ─────────────────────────────────────────────────────────────
 Elements.Create.Slider = function(container, opts)
-	local row = Elements.Row(container, opts, 220, 36, false)
+	local row = Elements.Row(container, opts, 240, 42, false)
 	local obj = { Type = "Slider" }
 	local core = Elements.MakeSlider(row.Right, {
-		Min = opts.Min, Max = opts.Max, Default = opts.Default, Step = opts.Step, Suffix = opts.Suffix,
+		Min = opts.Min, Max = opts.Max, Default = opts.Default, Step = opts.Step, Suffix = opts.Suffix, Icon = opts.KnobIcon,
 		OnChange = function(v) obj.Value = v; Util.Fire(opts.Callback, v) end,
 	})
 	obj.Value = core.Value
@@ -4483,16 +5239,17 @@ end
 --  Toggle slider: ONE control. A slider whose knob is also the switch.
 --    · drag the knob (or press the track) to change the value
 --    · tap the knob to turn it on / off
+--  The sphere can carry a Lucide icon while it is on: KnobIcon (default the row's Icon, or "zap"; false = none)
 --  Callback(enabled, value)
 -- ─────────────────────────────────────────────────────────────
 Elements.Create.ToggleSlider = function(container, opts)
-	local row = Elements.Row(container, opts, 236, 28, false)
+	local row = Elements.Row(container, opts, 262, 32, false)
 	local min, max, step = opts.Min or 0, opts.Max or 100, opts.Step or 1
 	local obj = { Type = "ToggleSlider", Enabled = opts.Enabled == true or opts.Default_Enabled == true, Value = Util.Clamp(opts.Default or min, min, max) }
 
-	local VALUE_W, KNOB, TRACK_H = 48, 20, 24
+	local VALUE_W, KNOB, TRACK_H = 54, 26, 32
 	local valueLabel = New("TextLabel", {
-		Weight = "SemiBold", TextSize = 12, Size = UDim2.new(0, VALUE_W - 6, 1, 0), TextXAlignment = Enum.TextXAlignment.Right, Parent = row.Right,
+		Weight = "SemiBold", TextSize = 13, Size = UDim2.new(0, VALUE_W - 6, 1, 0), TextXAlignment = Enum.TextXAlignment.Right, Parent = row.Right,
 	})
 	local track = New("Frame", {
 		Name = "Track", AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.fromScale(1, 0.5), Size = UDim2.new(1, -VALUE_W, 0, TRACK_H),
@@ -4501,6 +5258,7 @@ Elements.Create.ToggleSlider = function(container, opts)
 	Theme.Bind(track, { BackgroundColor3 = "Input" })
 	Util.Corner(track, TRACK_H)
 	Util.Shade(track, 90, 0.12)
+	Edge.Attach(track, "Chip", { Radius = TRACK_H, Alpha = 0.5, Contact = false, ZIndex = 6 })
 	local fillClip = New("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Parent = track })
 	local fill = New("Frame", { Size = UDim2.new(0, 0, 1, 0), BackgroundColor3 = WHITE, Parent = fillClip })
 	Util.Corner(fill, TRACK_H)
@@ -4516,6 +5274,14 @@ Elements.Create.ToggleSlider = function(container, opts)
 	local dot = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(0, 0), BackgroundColor3 = WHITE, ZIndex = 4, Parent = knob })
 	Util.Corner(dot, 12)
 	Theme.AccentGradient(dot, 45)
+	-- the icon shown on the sphere while the control is on (grows in with a little spin)
+	local KNOB_ICON = 16
+	local iconName = opts.KnobIcon
+	if iconName == nil then iconName = opts.Icon or "zap" end
+	local knobIcon
+	if iconName then
+		knobIcon = Util.Icon(knob, iconName, KNOB_ICON, "Accent", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), ImageTransparency = 1, ZIndex = 5 })
+	end
 
 	-- knob centre sits `KNOB/2 + 2` inside the track at both ends
 	local inset = KNOB / 2 + 2
@@ -4535,13 +5301,18 @@ Elements.Create.ToggleSlider = function(container, opts)
 	end
 	local function paintState(instant)
 		local on = obj.Enabled
-		local props = { fillT = on and 0 or 0.72, dot = on and UDim2.fromOffset(8, 8) or UDim2.fromOffset(0, 0) }
+		local props = { fillT = on and 0 or 0.72, dot = knobIcon and UDim2.fromOffset(0, 0) or (on and UDim2.fromOffset(8, 8) or UDim2.fromOffset(0, 0)) }
 		local labelColor = Theme.Resolve(on and "Text" or "Muted")
 		if instant then
 			fill.BackgroundTransparency, dot.Size = props.fillT, props.dot
 			knob.BackgroundColor3 = on and WHITE or Theme.Current.Muted
 			valueLabel.TextColor3 = labelColor
+			if knobIcon then knobIcon.ImageTransparency = on and 0 or 1 end
 		else
+			if knobIcon then
+				if on then knobIcon.Rotation = -80 end
+				Util.Tween(knobIcon, 0.32, { ImageTransparency = on and 0 or 1, Rotation = 0 }, on and "Back" or "Quad")
+			end
 			Util.Tween(fill, 0.25, { BackgroundTransparency = props.fillT }, "Quad")
 			Util.Tween(dot, 0.3, { Size = props.dot }, on and "Back" or "Quad")
 			Util.Tween(knob, 0.22, { BackgroundColor3 = on and WHITE or Theme.Current.Muted }, "Quad")
@@ -4633,7 +5404,7 @@ end
 --  Stepper  ( − 3 + )
 -- ─────────────────────────────────────────────────────────────
 Elements.Create.Stepper = function(container, opts)
-	local row = Elements.Row(container, opts, 108, 28, false)
+	local row = Elements.Row(container, opts, 120, 32, false)
 	local min, max, step = opts.Min or 0, opts.Max or 100, opts.Step or 1
 	local obj = { Type = "Stepper", Value = Util.Clamp(opts.Default or min, min, max) }
 
@@ -4641,8 +5412,8 @@ Elements.Create.Stepper = function(container, opts)
 	Theme.Bind(chip, { BackgroundColor3 = "Input" })
 	Util.Corner(chip, 9)
 	Util.Shade(chip, 90, 0.1)
-	Shadow.Edge(chip, { Inset = 5, Alpha = 0.82 })
-	local label = New("TextLabel", { Weight = "SemiBold", TextSize = 13, Size = UDim2.fromScale(1, 1), TextXAlignment = Enum.TextXAlignment.Center, Parent = chip })
+	Edge.Attach(chip, "Chip", { Radius = 9, Inset = 5, ShadowAlpha = 0.82, Alpha = 0.55, ZIndex = 5 })
+	local label = New("TextLabel", { Weight = "SemiBold", TextSize = 14, Size = UDim2.fromScale(1, 1), TextXAlignment = Enum.TextXAlignment.Center, Parent = chip })
 	Theme.Bind(label, { TextColor3 = "Text" })
 
 	function obj:Set(value, silent)
@@ -4653,8 +5424,8 @@ Elements.Create.Stepper = function(container, opts)
 		label.Text = Util.FormatNumber(value, step) .. (opts.Suffix or "")
 		if changed and not silent then
 			Sound.Play("Tick")
-			label.TextSize = 15
-			Util.Tween(label, 0.25, { TextSize = 13 }, "Back")
+			label.TextSize = 16
+			Util.Tween(label, 0.25, { TextSize = 14 }, "Back")
 			Util.Fire(opts.Callback, value)
 		end
 	end
@@ -4663,7 +5434,7 @@ Elements.Create.Stepper = function(container, opts)
 	local function bind(side, icon, dir)
 		local btn = New("TextButton", {
 			AnchorPoint = Vector2.new(side == "left" and 0 or 1, 0.5), Position = UDim2.new(side == "left" and 0 or 1, 0, 0.5, 0),
-			Size = UDim2.new(0, 30, 1, 0), BackgroundColor3 = WHITE, BackgroundTransparency = 1, Parent = chip,
+			Size = UDim2.new(0, 34, 1, 0), BackgroundColor3 = WHITE, BackgroundTransparency = 1, Parent = chip,
 		})
 		Theme.Bind(btn, { BackgroundColor3 = "InputHover" })
 		Util.Corner(btn, 9)
@@ -4705,29 +5476,29 @@ Elements.Create.Segmented = function(container, opts)
 	local obj = { Type = "Segmented", Value = values[1] }
 
 	New("Frame", { Size = UDim2.new(1, 0, 0, 3), BackgroundTransparency = 1, LayoutOrder = 3, Parent = row.Left })
-	local bar = New("Frame", { Size = UDim2.new(1, 0, 0, 32), LayoutOrder = 4, BackgroundColor3 = WHITE, Parent = row.Left })
+	local bar = New("Frame", { Size = UDim2.new(1, 0, 0, 36), LayoutOrder = 4, BackgroundColor3 = WHITE, Parent = row.Left })
 	Theme.Bind(bar, { BackgroundColor3 = "Input" })
-	Util.Corner(bar, 10)
+	Util.Corner(bar, 11)
 	Util.Shade(bar, 90, 0.12)
+	Edge.Attach(bar, "Chip", { Radius = 11, Alpha = 0.5, Contact = false, ZIndex = 5 })
 	local inner = New("Frame", { BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1), Parent = bar })
 	Util.Padding(inner, 3, 3, 3, 3)
 	local pill = New("Frame", { Size = UDim2.fromScale(1 / n, 1), BackgroundColor3 = WHITE, Parent = inner })
-	Util.Corner(pill, 8)
+	Util.Corner(pill, 9)
 	Theme.AccentGradient(pill, 20)
-	Shadow.Edge(pill, { Inset = 5, Alpha = 0.7 })
-	Util.FadeLine(pill, { Position = UDim2.new(0, 0, 0, 0), Size = UDim2.new(1, 0, 0, 1), Strength = 0.5, Token = function() return WHITE end, ZIndex = 3 })
+	Edge.Attach(pill, "Primary", { Radius = 9, Inset = 5, ShadowAlpha = 0.7, Alpha = 0.6, Token = function() return WHITE end, ZIndex = 4 })
 
 	local labels = {}
 	for i, value in values do
 		local btn = New("TextButton", { Position = UDim2.fromScale((i - 1) / n, 0), Size = UDim2.fromScale(1 / n, 1), ZIndex = 2, Parent = inner })
-		local text = New("TextLabel", { Weight = "Medium", TextSize = 12, Size = UDim2.fromScale(1, 1), TextXAlignment = Enum.TextXAlignment.Center, ZIndex = 2, Parent = btn })
+		local text = New("TextLabel", { Weight = "Medium", TextSize = 13, Size = UDim2.fromScale(1, 1), TextXAlignment = Enum.TextXAlignment.Center, ZIndex = 2, Parent = btn })
 		Theme.Bind(text, { TextColor3 = function(t) return obj.Value == value and t.AccentText or t.SubText end })
 		Util.SetText(text, tostring(value))
 		labels[value] = text
 		btn.Activated:Connect(function()
 			if obj.Locked then return end
 			Sound.Play("Select")
-			Fx.Ripple(btn, { Alpha = 0.88, Ring = false, Duration = 0.45, Radius = UDim.new(0, 8) })
+			Fx.Ripple(btn, { Alpha = 0.88, Ring = false, Duration = 0.45, Radius = UDim.new(0, 9) })
 			obj:Set(value)
 		end)
 	end
@@ -4761,33 +5532,40 @@ end
 --  Progress bar
 -- ─────────────────────────────────────────────────────────────
 Elements.Create.Progress = function(container, opts)
-	local row = Elements.Row(container, opts, 52, 18, false)
+	local row = Elements.Row(container, opts, 60, 20, false)
 	local min, max = opts.Min or 0, opts.Max or 100
 	local obj = { Type = "Progress", Value = min }
 
 	local percent = New("TextLabel", {
-		Weight = "SemiBold", TextSize = 12, Size = UDim2.fromScale(1, 1), TextXAlignment = Enum.TextXAlignment.Right, Parent = row.Right,
+		Weight = "SemiBold", TextSize = 14, Size = UDim2.fromScale(1, 1), TextXAlignment = Enum.TextXAlignment.Right, Parent = row.Right,
 	})
 	Theme.Bind(percent, { TextColor3 = "SubText" })
 
 	New("Frame", { Size = UDim2.new(1, 0, 0, 3), BackgroundTransparency = 1, LayoutOrder = 3, Parent = row.Left })
-	local track = New("Frame", { Size = UDim2.new(1, 0, 0, 7), LayoutOrder = 4, BackgroundColor3 = WHITE, Parent = row.Left })
+	local track = New("Frame", { Size = UDim2.new(1, 0, 0, 9), LayoutOrder = 4, BackgroundColor3 = WHITE, Parent = row.Left })
 	Theme.Bind(track, { BackgroundColor3 = "Input" })
-	Util.Corner(track, 4)
+	Util.Corner(track, 5)
 	Util.Shade(track, 90, 0.14)
+	Edge.Attach(track, "Chip", { Radius = 5, Alpha = 0.45, Contact = false, ZIndex = 5 })
 	local fill = New("Frame", { Size = UDim2.fromScale(0, 1), BackgroundColor3 = WHITE, Parent = track })
-	Util.Corner(fill, 4)
+	Util.Corner(fill, 5)
 	Theme.AccentGradient(fill, 0)
 	local head = New("Frame", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, 0, 0.5, 0), Size = UDim2.fromOffset(2, 11), BackgroundColor3 = WHITE, BackgroundTransparency = 0.2, Parent = fill })
 	Util.Corner(head, 2)
 
+	local customText
+	local counter = Util.Smoother(0, 10, function(r)
+		percent.Text = customText or string.format("%d%%", math.floor(r * 100 + 0.5))
+	end)
 	function obj:Set(value, text)
 		value = Util.Clamp(tonumber(value) or min, min, max)
 		obj.Value = value
 		local ratio = max > min and (value - min) / (max - min) or 0
-		Util.Tween(fill, 0.5, { Size = UDim2.fromScale(ratio, 1) }, "Out")
+		customText = text
+		Util.Tween(fill, 0.6, { Size = UDim2.fromScale(ratio, 1) }, "Out")
 		head.Visible = ratio > 0.02 and ratio < 0.999
-		percent.Text = text or string.format("%d%%", math.floor(ratio * 100 + 0.5))
+		counter.Set(ratio)
+		if text then percent.Text = text end
 	end
 	obj:Set(opts.Default or min)
 	fill.Size = UDim2.fromScale(max > min and (obj.Value - min) / (max - min) or 0, 1)
@@ -4956,25 +5734,26 @@ local function makeIndicator(parent, multi)
 end
 
 Elements.Create.Dropdown = function(container, opts)
-	local CHIP_W = opts.Width or 138
-	local ITEM_H, GAP = 34, 3
-	local row = Elements.Row(container, opts, CHIP_W, 28, true)
+	local CHIP_W = opts.Width or 156
+	local ITEM_H, GAP = 38, 3
+	local row = Elements.Row(container, opts, CHIP_W, 32, true)
 	local multi = opts.Multi == true
 	local obj = { Type = "Dropdown", Multi = multi, Items = normalizeItems(opts.Values) }
 	obj.Value = multi and {} or nil
 
 	local chip = New("Frame", { Name = "Chip", Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, Parent = row.Right })
 	Theme.Bind(chip, { BackgroundColor3 = "Input" })
-	Util.Corner(chip, 9)
+	Util.Corner(chip, 10)
 	Util.Shade(chip, 90, 0.1)
-	Shadow.Edge(chip, { Inset = 6, Alpha = 0.8 })
-	Util.FadeLine(chip, { Position = UDim2.new(0, 0, 0, 0), Size = UDim2.new(1, 0, 0, 1), Strength = 0.3, ZIndex = 3, Thickness = 1 })
+	Edge.Attach(chip, "Chip", { Radius = 10, Inset = 6, ShadowAlpha = 0.8, Alpha = 0.55, ZIndex = 5 })
 	local underline = Util.FadeLine(chip, {
 		AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, 0), Size = UDim2.new(0, 0, 0, 2),
 		Token = "Accent", Strength = 1, Thickness = 2, ZIndex = 4,
 	})
+	-- the picked item's icon sits in the chip (single mode)
+	local chipIcon = Util.Icon(chip, "circle", 15, "Accent", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 10, 0.5, 0), Visible = false })
 	local chipLabel = New("TextLabel", {
-		Weight = "Medium", TextSize = 12, Position = UDim2.fromOffset(11, 0), Size = UDim2.new(1, -34, 1, 0), TextTruncate = Enum.TextTruncate.AtEnd, Parent = chip,
+		Weight = "Medium", TextSize = 13, Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -36, 1, 0), TextTruncate = Enum.TextTruncate.AtEnd, Parent = chip,
 	})
 	Theme.Bind(chipLabel, { TextColor3 = "Text" })
 	local chevron = Util.Icon(chip, "chevron-down", 13, "SubText", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(1, -16, 0.5, 0) })
@@ -4986,6 +5765,12 @@ Elements.Create.Dropdown = function(container, opts)
 			if item.Value == value then return item.Title end
 		end
 		return tostring(value)
+	end
+	local function iconOf(value)
+		for _, item in obj.Items do
+			if item.Value == value then return item.Icon end
+		end
+		return nil
 	end
 	local function isSelected(value)
 		if multi then return table.find(obj.Value, value) ~= nil end
@@ -5010,6 +5795,21 @@ Elements.Create.Dropdown = function(container, opts)
 		chipLabel.Text = text
 		local empty = (multi and #obj.Value == 0) or (not multi and obj.Value == nil)
 		chipLabel.TextTransparency = empty and 0.45 or 0
+		local icon = (not multi and obj.Value ~= nil) and iconOf(obj.Value) or nil
+		if icon then
+			Icons.Apply(chipIcon, icon, 15, "Accent")
+			if not chipIcon.Visible then
+				chipIcon.Visible = true
+				chipIcon.Rotation = -40
+				Util.Tween(chipIcon, 0.35, { Rotation = 0 }, "Back")
+			end
+			chipLabel.Position = UDim2.fromOffset(32, 0)
+			chipLabel.Size = UDim2.new(1, -56, 1, 0)
+		else
+			chipIcon.Visible = false
+			chipLabel.Position = UDim2.fromOffset(12, 0)
+			chipLabel.Size = UDim2.new(1, -36, 1, 0)
+		end
 	end
 
 	local function fire()
@@ -5084,6 +5884,11 @@ Elements.Create.Dropdown = function(container, opts)
 						Util.Tween(e.Bar, 0.28, { Size = UDim2.fromOffset(3, on and 16 or 0) }, on and "Back" or "Quad")
 						Util.Tween(e.Label, 0.18, { TextColor3 = Theme.Resolve(on and "Text" or "SubText") }, "Quad")
 						Util.Tween(e.Label, 0.22, { Position = UDim2.fromOffset(e.X + (on and 4 or 0), 0) }, "Out")
+						if e.IconTile then
+							Util.Tween(e.IconTile, 0.22, { BackgroundTransparency = on and 0.72 or 0.9 }, "Quad")
+							Util.Tween(e.IconImg, 0.2, { ImageColor3 = Theme.Resolve(on and "Accent" or "SubText") }, "Quad")
+							if on and e.Pop then Fx.Pop(e.IconImg, 16) end
+						end
 						e.Indicator.Set(on, instant, e.Pop)
 						e.Pop = false
 					end
@@ -5122,12 +5927,20 @@ Elements.Create.Dropdown = function(container, opts)
 							Theme.AccentGradient(bar, 90)
 
 							local x = 14
+							local iconTile, iconImg
 							if item.Icon then
-								Util.Icon(inner, item.Icon, 14, "SubText", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 14, 0.5, 0) })
-								x = 36
+								iconTile = New("Frame", {
+									Name = "IconTile", AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 10, 0.5, 0), Size = UDim2.fromOffset(26, 26),
+									BackgroundColor3 = WHITE, BackgroundTransparency = 0.9, Parent = inner,
+								})
+								Theme.Bind(iconTile, { BackgroundColor3 = "Accent" })
+								Util.Corner(iconTile, 8)
+								iconImg = Util.Icon(iconTile, item.Icon, 15, "SubText", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5) })
+								Theme.Bind(iconImg, { ImageColor3 = function(t) return (item.Value ~= nil and isSelected(item.Value)) and t.Accent or t.SubText end })
+								x = 44
 							end
 							local label = New("TextLabel", {
-								Weight = "Medium", TextSize = 12, Position = UDim2.fromOffset(x, 0), Size = UDim2.new(1, -(x + 40), 1, 0),
+								Weight = "Medium", TextSize = 13, Position = UDim2.fromOffset(x, 0), Size = UDim2.new(1, -(x + 40), 1, 0),
 								TextTruncate = Enum.TextTruncate.AtEnd, Text = title, Parent = inner,
 							})
 							Theme.Bind(label, { TextColor3 = function(t) return (item.Value ~= nil and isSelected(item.Value)) and t.Text or t.SubText end })
@@ -5137,7 +5950,7 @@ Elements.Create.Dropdown = function(container, opts)
 								Util.FadeLine(btn, { Position = UDim2.new(0, 16, 1, 1), Size = UDim2.new(1, -32, 0, 1), Strength = 0.3, ZIndex = 3, Thickness = 1 })
 							end
 
-							local entry = { Button = btn, Label = label, Tint = tint, Bar = bar, Indicator = indicator, Item = item, X = x, Pop = false }
+							local entry = { Button = btn, Label = label, Tint = tint, Bar = bar, Indicator = indicator, Item = item, X = x, Pop = false, IconTile = iconTile, IconImg = iconImg }
 							table.insert(entries, entry)
 
 							btn.MouseEnter:Connect(function() Util.Tween(btn, 0.12, { BackgroundTransparency = 0.55 }, "Quad") end)
@@ -5266,21 +6079,20 @@ end
 -- ─────────────────────────────────────────────────────────────
 Elements.Create.Input = function(container, opts)
 	local W = opts.Width or 160
-	local row = Elements.Row(container, opts, W, 28, false)
+	local row = Elements.Row(container, opts, W, 32, false)
 	local obj = { Type = "Input", Value = tostring(opts.Default or "") }
 
 	local chip = New("Frame", { Name = "Chip", Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, Parent = row.Right })
 	Theme.Bind(chip, { BackgroundColor3 = "Input" })
 	Util.Corner(chip, 9)
 	Util.Shade(chip, 90, 0.1)
-	Shadow.Edge(chip, { Inset = 6, Alpha = 0.8 })
-	Util.FadeLine(chip, { Position = UDim2.new(0, 0, 0, 0), Size = UDim2.new(1, 0, 0, 1), Strength = 0.3, ZIndex = 3, Thickness = 1 })
+	local edge = Edge.Attach(chip, "Input", { Radius = 9, Inset = 6, ShadowAlpha = 0.8, Alpha = 0.55, ZIndex = 5 })
 	local underline = Util.FadeLine(chip, {
 		AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, 0), Size = UDim2.new(0, 0, 0, 2),
 		Token = "Accent", Strength = 1, Thickness = 2, ZIndex = 4,
 	})
 	local box = New("TextBox", {
-		Weight = "Medium", TextSize = 12, Position = UDim2.fromOffset(11, 0), Size = UDim2.new(1, -22, 1, 0), Text = obj.Value,
+		Weight = "Medium", TextSize = 13, Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -24, 1, 0), Text = obj.Value,
 		PlaceholderText = Loc.Resolve(opts.Placeholder or "Type here..."), ClearTextOnFocus = opts.ClearOnFocus == true, ClipsDescendants = true, Parent = chip,
 	})
 	Theme.Bind(box, { TextColor3 = "Text", PlaceholderColor3 = "Muted" })
@@ -5296,10 +6108,12 @@ Elements.Create.Input = function(container, opts)
 	box.Focused:Connect(function()
 		Util.Tween(underline, 0.35, { Size = UDim2.new(1, -8, 0, 2) }, "Out")
 		Util.Tween(chip, 0.15, { BackgroundColor3 = Theme.Current.InputHover }, "Quad")
+		Edge.SetRest(edge, 1, 0.2)
 	end)
 	box.FocusLost:Connect(function()
 		Util.Tween(underline, 0.28, { Size = UDim2.new(0, 0, 0, 2) }, "Quad")
 		Util.Tween(chip, 0.2, { BackgroundColor3 = Theme.Current.Input }, "Quad")
+		Edge.SetRest(edge, 0, 0.3)
 		commit()
 	end)
 	box:GetPropertyChangedSignal("Text"):Connect(function()
@@ -5365,20 +6179,19 @@ function Util.ParseKeyCode(value)
 end
 
 Elements.Create.Keybind = function(container, opts)
-	local row = Elements.Row(container, opts, 92, 28, true)
+	local row = Elements.Row(container, opts, 100, 32, true)
 	local obj = { Type = "Keybind", Value = parseKey(opts.Default), Mode = opts.Mode or "Press", State = false, Listening = false }
 
 	local chip = New("Frame", { Name = "Chip", Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, Parent = row.Right })
 	Theme.Bind(chip, { BackgroundColor3 = "Input" })
 	Util.Corner(chip, 9)
 	Util.Shade(chip, 90, 0.1)
-	Shadow.Edge(chip, { Inset = 6, Alpha = 0.8 })
-	Util.FadeLine(chip, { Position = UDim2.new(0, 0, 0, 0), Size = UDim2.new(1, 0, 0, 1), Strength = 0.3, ZIndex = 3, Thickness = 1 })
+	local edge = Edge.Attach(chip, "Input", { Radius = 9, Inset = 6, ShadowAlpha = 0.8, Alpha = 0.55, ZIndex = 5 })
 	local underline = Util.FadeLine(chip, {
 		AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, 0), Size = UDim2.new(0, 0, 0, 2),
 		Token = "Accent", Strength = 1, Thickness = 2, ZIndex = 4,
 	})
-	local label = New("TextLabel", { Weight = "SemiBold", TextSize = 12, Size = UDim2.fromScale(1, 1), TextXAlignment = Enum.TextXAlignment.Center, Parent = chip })
+	local label = New("TextLabel", { Weight = "SemiBold", TextSize = 13, Size = UDim2.fromScale(1, 1), TextXAlignment = Enum.TextXAlignment.Center, Parent = chip })
 	Theme.Bind(label, { TextColor3 = "Text" })
 
 	local pulse
@@ -5488,6 +6301,9 @@ end
 
 -- ─────────────────────────────────────────────────────────────
 --  Colour picker
+--  Pad + hue / alpha bars, a HEX box and RGB / HSV tabs (slider + number for every channel).
+--  What you see eases toward the real value every frame, so dragging feels liquid.
+--  opts: { Default (Color3 | "#hex"), Transparency/Alpha = true, DefaultAlpha, Presets = { Color3 | "#hex", ... }, Callback(color, alpha) }
 -- ─────────────────────────────────────────────────────────────
 local HUE_SEQUENCE = ColorSequence.new({
 	ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 0, 0)), ColorSequenceKeypoint.new(1 / 6, Color3.fromRGB(255, 255, 0)),
@@ -5496,8 +6312,16 @@ local HUE_SEQUENCE = ColorSequence.new({
 	ColorSequenceKeypoint.new(1, Color3.fromRGB(255, 0, 0)),
 })
 
+local PickerMemory = { Mode = "RGB" }   -- the tab you used last stays selected next time
+
+local function easeStep(current, target, k)
+	local diff = target - current
+	if math.abs(diff) < 0.0005 then return target, false end
+	return current + diff * k, true
+end
+
 Elements.Create.Colorpicker = function(container, opts)
-	local row = Elements.Row(container, opts, 48, 24, true)
+	local row = Elements.Row(container, opts, 54, 28, true)
 	local useAlpha = opts.Transparency == true or opts.Alpha == true
 	local startColor = opts.Default
 	if type(startColor) == "string" then startColor = Util.FromHex(startColor) end
@@ -5505,18 +6329,18 @@ Elements.Create.Colorpicker = function(container, opts)
 	local h, s, v = startColor:ToHSV()
 	local obj = { Type = "Colorpicker", Value = startColor, Alpha = opts.DefaultAlpha or 1 }
 
+	-- swatch on the row ────────────────────────────────────
 	local swatchBack = New("Frame", {
 		AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.fromScale(1, 0.5), Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, Parent = row.Right,
 	})
 	Theme.Bind(swatchBack, { BackgroundColor3 = "Input" })
-	Util.Corner(swatchBack, 8)
-	Shadow.Edge(swatchBack, { Inset = 5, Alpha = 0.78 })
+	Util.Corner(swatchBack, 9)
+	Edge.Attach(swatchBack, "Chip", { Radius = 9, Alpha = 0.6, Inset = 5, ShadowAlpha = 0.8, ZIndex = 4 })
 	local swatch = New("Frame", {
-		AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.new(1, -6, 1, -6), BackgroundColor3 = startColor, Parent = swatchBack,
+		AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.new(1, -8, 1, -8), BackgroundColor3 = startColor, Parent = swatchBack,
 	})
 	Util.Corner(swatch, 6)
 	Util.Shade(swatch, 90, 0.16)
-	Util.FadeLine(swatch, { Position = UDim2.new(0, 0, 0, 0), Size = UDim2.new(1, 0, 0, 1), Strength = 0.55, Token = function() return WHITE end, ZIndex = 3, Thickness = 1 })
 
 	local function fire() Util.Fire(opts.Callback, obj.Value, obj.Alpha) end
 	local function apply(silent)
@@ -5526,6 +6350,13 @@ Elements.Create.Colorpicker = function(container, opts)
 		if obj._refresh then obj._refresh() end
 		if not silent then fire() end
 	end
+	--- take a Color3 without losing the hue when the colour is grey or black
+	local function takeColor(c)
+		local nh, ns, nv = c:ToHSV()
+		if ns > 0.001 and nv > 0.001 then h = nh end
+		if nv > 0.001 then s = ns end
+		v = nv
+	end
 
 	function obj:Set(color, alpha, silent)
 		if type(color) == "string" then color = Util.FromHex(color) end
@@ -5533,130 +6364,379 @@ Elements.Create.Colorpicker = function(container, opts)
 		if alpha then obj.Alpha = Util.Clamp(alpha, 0, 1) end
 		apply(silent)
 	end
+	function obj:SetRGB(r, g, b, silent) obj:Set(Color3.fromRGB(r, g, b), nil, silent) end
+	function obj:SetHSV(hh, ss, vv, silent) obj:Set(Color3.fromHSV(Util.Clamp(hh, 0, 1), Util.Clamp(ss, 0, 1), Util.Clamp(vv, 0, 1)), nil, silent) end
+	function obj:GetHex() return Util.ToHex(obj.Value) end
 	function obj:Close() if obj._popover then obj._popover.Close() end end
 
 	function obj:Open()
 		local window = container.Window
 		local host = window.Host
-		local W = 236
-		local inner = W - 20
-		local alphaY = 10 + 116 + 10 + 12 + 10
-		local hexY = alphaY + (useAlpha and 22 or 0)
-		local presetY = hexY + 30 + 10
-		local H = presetY + 22 + 12
+		local W, PAD = 280, 14
+		local inner = W - PAD * 2
+		local CH = 22
+		local svH = 124
+		local hueY = PAD + svH + 12
+		local alphaY = hueY + 22
+		local topY = hueY + 22 + (useAlpha and 22 or 0)
+		local tabsY = topY + 34 + 12
+		local chanY = tabsY + 26 + 10
+		local chanH = CH * 3 + 12
+		local presetY = chanY + chanH + 12
+		local H = presetY + 22 + PAD
+
+		local original, originalAlpha = obj.Value, obj.Alpha
+		local disp = { h = h, s = s, v = v, a = obj.Alpha }
+		local easer
+		local mode = PickerMemory.Mode
+		local paint, updateInputs
+
+		local function ease()
+			if easer then return end
+			easer = RunService.RenderStepped:Connect(function(dt)
+				local k = 1 - math.exp(-26 * dt)
+				local m1, m2, m3, m4
+				disp.h, m1 = easeStep(disp.h, h, k)
+				disp.s, m2 = easeStep(disp.s, s, k)
+				disp.v, m3 = easeStep(disp.v, v, k)
+				disp.a, m4 = easeStep(disp.a, obj.Alpha, k)
+				paint()
+				if not (m1 or m2 or m3 or m4) then easer:Disconnect(); easer = nil end
+			end)
+		end
 
 		obj._popover = Util.OpenPopover(host, window.Overlay, row.Right, {
 			Width = W, Height = H, Align = "Right",
-			OnClose = function() obj._popover = nil; obj._refresh = nil end,
+			OnClose = function()
+				if easer then easer:Disconnect(); easer = nil end
+				obj._popover = nil
+				obj._refresh = nil
+			end,
 			Build = function(frame)
-				-- saturation / value box
-				local sv = New("TextButton", { Position = UDim2.fromOffset(10, 10), Size = UDim2.fromOffset(inner, 116), BackgroundColor3 = Color3.fromHSV(h, 1, 1), Parent = frame })
-				Util.Corner(sv, 9)
-				local white = New("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, Parent = sv })
-				Util.Corner(white, 9)
-				New("UIGradient", { Transparency = NumberSequence.new(0, 1), Parent = white })
-				local black = New("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = BLACK, Parent = sv })
-				Util.Corner(black, 9)
-				New("UIGradient", { Rotation = 90, Transparency = NumberSequence.new(1, 0), Parent = black })
-				local cursor = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Size = UDim2.fromOffset(16, 16), BackgroundColor3 = WHITE, ZIndex = 3, Parent = sv })
-				Util.Corner(cursor, 16)
-				local cursorFill = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(11, 11), BackgroundColor3 = obj.Value, ZIndex = 4, Parent = cursor })
-				Util.Corner(cursorFill, 11)
-
-				-- hue bar
-				local hue = New("TextButton", { Position = UDim2.fromOffset(10, 136), Size = UDim2.fromOffset(inner, 12), BackgroundColor3 = WHITE, Parent = frame })
-				Util.Corner(hue, 6)
-				New("UIGradient", { Color = HUE_SEQUENCE, Parent = hue })
-				local hueBack = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(h, 0.5), Size = UDim2.fromOffset(10, 18), BackgroundColor3 = BLACK, BackgroundTransparency = 0.6, ZIndex = 2, Parent = hue })
-				Util.Corner(hueBack, 5)
-				local hueThumb = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(7, 15), BackgroundColor3 = WHITE, ZIndex = 3, Parent = hueBack })
-				Util.Corner(hueThumb, 4)
-
-				-- alpha bar
-				local alpha, alphaFill, alphaBack
-				if useAlpha then
-					alpha = New("TextButton", { Position = UDim2.fromOffset(10, alphaY), Size = UDim2.fromOffset(inner, 12), BackgroundColor3 = WHITE, Parent = frame })
-					Theme.Bind(alpha, { BackgroundColor3 = "Input" })
-					Util.Corner(alpha, 6)
-					alphaFill = New("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = obj.Value, Parent = alpha })
-					Util.Corner(alphaFill, 6)
-					New("UIGradient", { Transparency = NumberSequence.new(1, 0), Parent = alphaFill })
-					alphaBack = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(obj.Alpha, 0.5), Size = UDim2.fromOffset(10, 18), BackgroundColor3 = BLACK, BackgroundTransparency = 0.6, ZIndex = 2, Parent = alpha })
-					Util.Corner(alphaBack, 5)
-					local alphaThumb = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(7, 15), BackgroundColor3 = WHITE, ZIndex = 3, Parent = alphaBack })
-					Util.Corner(alphaThumb, 4)
-				end
-
-				-- hex row
-				local preview = New("Frame", { Position = UDim2.fromOffset(10, hexY), Size = UDim2.fromOffset(30, 30), BackgroundColor3 = obj.Value, Parent = frame })
-				Util.Corner(preview, 9)
-				Shadow.Edge(preview, { Inset = 4, Alpha = 0.8 })
-				local hexBox = New("Frame", { Position = UDim2.fromOffset(48, hexY), Size = UDim2.fromOffset(inner - 38, 30), BackgroundColor3 = WHITE, Parent = frame })
-				Theme.Bind(hexBox, { BackgroundColor3 = "Input" })
-				Util.Corner(hexBox, 9)
-				Util.Shade(hexBox, 90, 0.1)
-				local hexInput = New("TextBox", {
-					Weight = "Medium", TextSize = 12, Position = UDim2.fromOffset(11, 0), Size = UDim2.new(1, -22, 1, 0), Text = Util.ToHex(obj.Value), PlaceholderText = "#RRGGBB", Parent = hexBox,
-				})
-				Theme.Bind(hexInput, { TextColor3 = "Text", PlaceholderColor3 = "Muted" })
-				local hexLine = Util.FadeLine(hexBox, {
-					AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, 0), Size = UDim2.new(0, 0, 0, 2),
-					Token = "Accent", Strength = 1, Thickness = 2, ZIndex = 4,
-				})
-				hexInput.Focused:Connect(function() Util.Tween(hexLine, 0.3, { Size = UDim2.new(1, -8, 0, 2) }, "Out") end)
-				hexInput.FocusLost:Connect(function()
-					Util.Tween(hexLine, 0.25, { Size = UDim2.new(0, 0, 0, 2) }, "Quad")
-					local color = Util.FromHex(hexInput.Text)
-					if color then h, s, v = color:ToHSV(); apply() else hexInput.Text = Util.ToHex(obj.Value) end
-				end)
-
-				-- presets
-				local t = Theme.Current
-				local presets = { t.Accent, t.Accent2, t.Success, t.Warning, t.Danger, t.Info, WHITE, BLACK }
-				local count = #presets
-				local gap = (inner - count * 22) / (count - 1)
-				for i, color in presets do
-					local chipBtn = New("TextButton", {
-						Position = UDim2.fromOffset(10 + (i - 1) * (22 + gap), presetY), Size = UDim2.fromOffset(22, 22), BackgroundColor3 = color, Parent = frame,
-					})
-					Util.Corner(chipBtn, 7)
-					Util.Shade(chipBtn, 90, 0.14)
-					chipBtn.MouseEnter:Connect(function() Util.Tween(chipBtn, 0.15, { Position = UDim2.fromOffset(10 + (i - 1) * (22 + gap), presetY - 2) }, "Back") end)
-					chipBtn.MouseLeave:Connect(function() Util.Tween(chipBtn, 0.2, { Position = UDim2.fromOffset(10 + (i - 1) * (22 + gap), presetY) }, "Quad") end)
-					chipBtn.Activated:Connect(function()
-						Sound.Play("Tick")
-						h, s, v = color:ToHSV()
-						apply()
-					end)
-				end
-
-				obj._refresh = function()
-					sv.BackgroundColor3 = Color3.fromHSV(h, 1, 1)
-					cursor.Position = UDim2.fromScale(s, 1 - v)
-					cursorFill.BackgroundColor3 = obj.Value
-					hueBack.Position = UDim2.fromScale(h, 0.5)
-					preview.BackgroundColor3 = obj.Value
-					if not hexInput:IsFocused() then hexInput.Text = Util.ToHex(obj.Value) end
-					if alphaFill then alphaFill.BackgroundColor3 = obj.Value; alphaBack.Position = UDim2.fromScale(obj.Alpha, 0.5) end
-				end
-				obj._refresh()
-
 				local function ratioOf(gui, pos, axis)
 					local size = axis == "X" and gui.AbsoluteSize.X or gui.AbsoluteSize.Y
 					local origin = axis == "X" and gui.AbsolutePosition.X or gui.AbsolutePosition.Y
 					return Util.Clamp(((axis == "X" and pos.X or pos.Y) - origin) / math.max(size, 1), 0, 1)
 				end
+
+				-- a small input box with the stroke that lights up while you type
+				local function inputBox(x, y, w, hgt, placeholder, parent)
+					local box = New("Frame", { Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(w, hgt), BackgroundColor3 = WHITE, Parent = parent or frame })
+					Theme.Bind(box, { BackgroundColor3 = "Input" })
+					Util.Corner(box, 8)
+					Util.Shade(box, 90, 0.1)
+					local edge = Edge.Attach(box, "Input", { Radius = 8, Alpha = 0.5, Contact = false, ZIndex = 4 })
+					local input = New("TextBox", {
+						Weight = "Medium", TextSize = 12, Position = UDim2.fromOffset(8, 0), Size = UDim2.new(1, -16, 1, 0),
+						Text = "", PlaceholderText = placeholder or "", ClearTextOnFocus = false, Parent = box,
+					})
+					Theme.Bind(input, { TextColor3 = "Text", PlaceholderColor3 = "Muted" })
+					input.Focused:Connect(function() Edge.Level(edge, 1, 0.18) end)
+					input.FocusLost:Connect(function() Edge.Level(edge, 0, 0.3) end)
+					return box, input, edge
+				end
+				local function reject(box, edge)
+					local base = box.Position
+					Edge.SetToken(edge, "Danger")
+					Edge.Level(edge, 1, 0.1)
+					for i, dx in { 6, -6, 4, -4, 0 } do
+						task.delay((i - 1) * 0.045, function()
+							if box.Parent then Util.Tween(box, 0.05, { Position = UDim2.new(base.X.Scale, base.X.Offset + dx, base.Y.Scale, base.Y.Offset) }, "Quad") end
+						end)
+					end
+					task.delay(0.5, function()
+						if edge.Stroke.Parent then Edge.SetToken(edge, "Stroke"); Edge.Level(edge, 0, 0.3) end
+					end)
+				end
+
+				-- saturation / value pad ─────────────────────
+				local sv = New("TextButton", { Position = UDim2.fromOffset(PAD, PAD), Size = UDim2.fromOffset(inner, svH), BackgroundColor3 = Color3.fromHSV(h, 1, 1), Parent = frame })
+				Util.Corner(sv, 10)
+				local white = New("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, Parent = sv })
+				Util.Corner(white, 10)
+				New("UIGradient", { Transparency = NumberSequence.new(0, 1), Parent = white })
+				local black = New("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = BLACK, Parent = sv })
+				Util.Corner(black, 10)
+				New("UIGradient", { Rotation = 90, Transparency = NumberSequence.new(1, 0), Parent = black })
+				Edge.Attach(sv, "Chip", { Radius = 10, Alpha = 0.55, Contact = false, ZIndex = 5 })
+				local cursor = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Size = UDim2.fromOffset(18, 18), BackgroundColor3 = WHITE, ZIndex = 6, Parent = sv })
+				Util.Corner(cursor, 18)
+				New("UIStroke", { Thickness = 1, Color = BLACK, Transparency = 0.7, Parent = cursor })
+				local cursorFill = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.new(1, -5, 1, -5), BackgroundColor3 = obj.Value, ZIndex = 7, Parent = cursor })
+				Util.Corner(cursorFill, 18)
+
+				-- a slider bar (hue / alpha) with a thumb that rides inside it
+				local function bar(y)
+					local hit = New("TextButton", { Position = UDim2.fromOffset(PAD, y - 5), Size = UDim2.fromOffset(inner, 22), BackgroundTransparency = 1, Parent = frame })
+					local track = New("Frame", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.fromScale(0, 0.5), Size = UDim2.new(1, 0, 0, 12), BackgroundColor3 = WHITE, Parent = hit })
+					Util.Corner(track, 6)
+					local rail = New("Frame", { BackgroundTransparency = 1, Position = UDim2.fromOffset(7, 0), Size = UDim2.new(1, -14, 1, 0), Parent = hit })
+					local thumb = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0, 0.5), Size = UDim2.fromOffset(16, 16), BackgroundColor3 = WHITE, ZIndex = 3, Parent = rail })
+					Util.Corner(thumb, 16)
+					New("UIStroke", { Thickness = 1, Color = BLACK, Transparency = 0.7, Parent = thumb })
+					local fill = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.new(1, -5, 1, -5), BackgroundColor3 = WHITE, ZIndex = 4, Parent = thumb })
+					Util.Corner(fill, 16)
+					return hit, track, rail, thumb, fill
+				end
+				local hueHit, hueTrack, hueRail, hueThumb, hueFill = bar(hueY)
+				New("UIGradient", { Color = HUE_SEQUENCE, Parent = hueTrack })
+
+				local alphaHit, alphaTrack, alphaRail, alphaThumb, alphaFill, alphaGrad
+				if useAlpha then
+					alphaHit, alphaTrack, alphaRail, alphaThumb, alphaFill = bar(alphaY)
+					alphaTrack.BackgroundColor3 = WHITE
+					Theme.Bind(alphaTrack, { BackgroundColor3 = "Input" })
+					local tint = New("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = obj.Value, Parent = alphaTrack })
+					Util.Corner(tint, 6)
+					alphaGrad = New("UIGradient", { Transparency = NumberSequence.new(1, 0), Parent = tint })
+					Util.SetPart(alphaTrack, "Tint", tint)
+				end
+
+				-- preview (original | new), hex box, copy ─────
+				local previewHolder = New("Frame", { Position = UDim2.fromOffset(PAD, topY), Size = UDim2.fromOffset(34, 34), BackgroundTransparency = 1, Parent = frame })
+				Util.Corner(previewHolder, 10)
+				local previewCanvas = New("CanvasGroup", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Parent = previewHolder })
+				Util.Corner(previewCanvas, 10)
+				local oldHalf = New("TextButton", { Size = UDim2.fromScale(0.5, 1), BackgroundColor3 = original, BackgroundTransparency = 1 - originalAlpha, Parent = previewCanvas })
+				local newHalf = New("Frame", { Position = UDim2.fromScale(0.5, 0), Size = UDim2.fromScale(0.5, 1), BackgroundColor3 = obj.Value, Parent = previewCanvas })
+				Edge.Attach(previewHolder, "Chip", { Radius = 10, Alpha = 0.6, Inset = 4, ShadowAlpha = 0.8, ZIndex = 6 })
+				oldHalf.Activated:Connect(function()
+					Sound.Play("Tick")
+					takeColor(original)
+					obj.Alpha = originalAlpha
+					apply()
+				end)
+
+				local hexBox, hexInput, hexEdge = inputBox(PAD + 42, topY, inner - 42 - 38, 34, "#RRGGBB")
+				hexInput.TextSize = 13
+				hexInput.FocusLost:Connect(function()
+					local color = Util.FromHex(hexInput.Text)
+					if color then
+						takeColor(color)
+						apply()
+					else
+						reject(hexBox, hexEdge)
+						hexInput.Text = Util.ToHex(obj.Value)
+					end
+				end)
+				local copy = New("TextButton", { Position = UDim2.fromOffset(PAD + inner - 34, topY), Size = UDim2.fromOffset(34, 34), BackgroundColor3 = WHITE, Parent = frame })
+				Theme.Bind(copy, { BackgroundColor3 = "Input" })
+				Util.Corner(copy, 9)
+				Util.Shade(copy, 90, 0.1)
+				Edge.Attach(copy, "Button", { Radius = 9, Alpha = 0.5, Contact = false, ZIndex = 4 })
+				Util.PressScale(copy, copy, 0.92)
+				local copyIcon = Util.Icon(copy, "copy", 15, "SubText", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5) })
+				local copyToken = 0
+				copy.MouseEnter:Connect(function() Util.Tween(copyIcon, 0.15, { ImageColor3 = Theme.Current.Text }, "Quad") end)
+				copy.MouseLeave:Connect(function() Util.Tween(copyIcon, 0.2, { ImageColor3 = Theme.Current.SubText }, "Quad") end)
+				copy.Activated:Connect(function()
+					Sound.Play("Click")
+					Util.Copy(Util.ToHex(obj.Value))
+					copyToken += 1
+					local mine = copyToken
+					Icons.Apply(copyIcon, "check", 15, "Success")
+					task.delay(1.1, function()
+						if copyToken == mine and copyIcon.Parent then Icons.Apply(copyIcon, "copy", 15, "SubText") end
+					end)
+				end)
+
+				-- RGB / HSV tabs ──────────────────────────────
+				local tabs = New("Frame", { Position = UDim2.fromOffset(PAD, tabsY), Size = UDim2.fromOffset(inner, 26), BackgroundColor3 = WHITE, Parent = frame })
+				Theme.Bind(tabs, { BackgroundColor3 = "Input" })
+				Util.Corner(tabs, 9)
+				Util.Shade(tabs, 90, 0.1)
+				local pill = New("Frame", { Position = UDim2.fromOffset(3, 3), Size = UDim2.new(0.5, -4, 1, -6), BackgroundColor3 = WHITE, BackgroundTransparency = 0.8, ZIndex = 2, Parent = tabs })
+				Theme.Bind(pill, { BackgroundColor3 = "Accent" })
+				Util.Corner(pill, 7)
+				Edge.Attach(pill, "Tab", { Radius = 7, Alpha = 0.6, Contact = false, Token = "Accent", ZIndex = 3 })
+				local tabButtons = {}
+				for i, name in { "RGB", "HSV" } do
+					local btn = New("TextButton", { Position = UDim2.fromScale((i - 1) / 2, 0), Size = UDim2.fromScale(0.5, 1), ZIndex = 4, Parent = tabs })
+					local label = New("TextLabel", { Weight = "SemiBold", TextSize = 11, Size = UDim2.fromScale(1, 1), ZIndex = 4, Parent = btn })
+					Util.SetText(label, name)
+					tabButtons[name] = { Button = btn, Label = label }
+				end
+
+				-- channel rows (one CanvasGroup per tab so the swap can slide + fade) ─────
+				local labelW = 16
+				local boxW = 50
+				local trackX = PAD + labelW + 6
+				local trackW = inner - labelW - 6 - boxW - 8
+				local function group()
+					return New("CanvasGroup", { Position = UDim2.fromOffset(0, chanY), Size = UDim2.fromOffset(W, chanH), BackgroundTransparency = 1, Parent = frame })
+				end
+				local rgbGroup, hsvGroup = group(), group()
+				local numberInputs = {}
+
+				local function channel(parent, index, labelText, gradient, readout, onRatio, onNumber)
+					local y = (index - 1) * (CH + 6)
+					local lbl = New("TextLabel", { Weight = "SemiBold", TextSize = 11, Position = UDim2.fromOffset(PAD, y), Size = UDim2.fromOffset(labelW, CH), Parent = parent })
+					Theme.Bind(lbl, { TextColor3 = "Muted" })
+					Util.SetText(lbl, labelText)
+					local hit = New("TextButton", { Position = UDim2.fromOffset(trackX, y), Size = UDim2.fromOffset(trackW, CH), BackgroundTransparency = 1, Parent = parent })
+					local track = New("Frame", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.fromScale(0, 0.5), Size = UDim2.new(1, 0, 0, 8), BackgroundColor3 = WHITE, Parent = hit })
+					Util.Corner(track, 4)
+					local grad = New("UIGradient", { Parent = track })
+					if gradient then grad.Color = gradient end
+					local rail = New("Frame", { BackgroundTransparency = 1, Position = UDim2.fromOffset(7, 0), Size = UDim2.new(1, -14, 1, 0), Parent = hit })
+					local thumb = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0, 0.5), Size = UDim2.fromOffset(14, 14), BackgroundColor3 = WHITE, ZIndex = 3, Parent = rail })
+					Util.Corner(thumb, 14)
+					New("UIStroke", { Thickness = 1, Color = BLACK, Transparency = 0.65, Parent = thumb })
+					Util.Drag(hit, function(pos) onRatio(ratioOf(rail, pos, "X")) end,
+						function() Util.Tween(thumb, 0.14, { Size = UDim2.fromOffset(18, 18) }, "Back") end,
+						function() Util.Tween(thumb, 0.2, { Size = UDim2.fromOffset(14, 14) }, "Quad") end)
+					local _, input = inputBox(PAD + inner - boxW, y, boxW, CH, "0", parent)
+					input.TextXAlignment = Enum.TextXAlignment.Center
+					input.TextSize = 11
+					input.FocusLost:Connect(function()
+						local n = tonumber(input.Text)
+						if n then onNumber(n) else updateInputs() end
+					end)
+					numberInputs[#numberInputs + 1] = { Input = input, Read = readout }
+					return { Grad = grad, Thumb = thumb }
+				end
+
+				local function setRGB(r, g, b)
+					takeColor(Color3.new(Util.Clamp(r, 0, 1), Util.Clamp(g, 0, 1), Util.Clamp(b, 0, 1)))
+					apply()
+				end
+				local rgb = {
+					channel(rgbGroup, 1, "R", nil, function() return math.floor(obj.Value.R * 255 + 0.5) end,
+						function(t) setRGB(t, obj.Value.G, obj.Value.B) end, function(n) setRGB(n / 255, obj.Value.G, obj.Value.B) end),
+					channel(rgbGroup, 2, "G", nil, function() return math.floor(obj.Value.G * 255 + 0.5) end,
+						function(t) setRGB(obj.Value.R, t, obj.Value.B) end, function(n) setRGB(obj.Value.R, n / 255, obj.Value.B) end),
+					channel(rgbGroup, 3, "B", nil, function() return math.floor(obj.Value.B * 255 + 0.5) end,
+						function(t) setRGB(obj.Value.R, obj.Value.G, t) end, function(n) setRGB(obj.Value.R, obj.Value.G, n / 255) end),
+				}
+				local hsv = {
+					channel(hsvGroup, 1, "H", HUE_SEQUENCE, function() return math.floor(h * 360 + 0.5) end,
+						function(t) h = t; apply() end, function(n) h = Util.Clamp(n / 360, 0, 1); apply() end),
+					channel(hsvGroup, 2, "S", nil, function() return math.floor(s * 100 + 0.5) end,
+						function(t) s = t; apply() end, function(n) s = Util.Clamp(n / 100, 0, 1); apply() end),
+					channel(hsvGroup, 3, "V", nil, function() return math.floor(v * 100 + 0.5) end,
+						function(t) v = t; apply() end, function(n) v = Util.Clamp(n / 100, 0, 1); apply() end),
+				}
+
+				-- presets ─────────────────────────────────────
+				local t = Theme.Current
+				local presets = {}
+				if type(opts.Presets) == "table" then
+					for _, p in opts.Presets do
+						local c = type(p) == "string" and Util.FromHex(p) or p
+						if typeof(c) == "Color3" and #presets < 10 then presets[#presets + 1] = c end
+					end
+				end
+				if #presets == 0 then presets = { t.Accent, t.Accent2, t.Success, t.Warning, t.Danger, t.Info, WHITE, BLACK } end
+				local count = #presets
+				local chip = 22
+				local gap = count > 1 and (inner - count * chip) / (count - 1) or 0
+				for i, color in presets do
+					local px = PAD + (i - 1) * (chip + gap)
+					local chipBtn = New("TextButton", { Position = UDim2.fromOffset(px, presetY), Size = UDim2.fromOffset(chip, chip), BackgroundColor3 = color, Parent = frame })
+					Util.Corner(chipBtn, 7)
+					Util.Shade(chipBtn, 90, 0.14)
+					Edge.Attach(chipBtn, "Chip", { Radius = 7, Alpha = 0.55, Contact = false, ZIndex = 4 })
+					chipBtn.MouseEnter:Connect(function() Util.Tween(chipBtn, 0.16, { Position = UDim2.fromOffset(px, presetY - 3) }, "Back") end)
+					chipBtn.MouseLeave:Connect(function() Util.Tween(chipBtn, 0.22, { Position = UDim2.fromOffset(px, presetY) }, "Quad") end)
+					Util.PressScale(chipBtn, chipBtn, 0.88)
+					chipBtn.Activated:Connect(function()
+						Sound.Play("Tick")
+						takeColor(color)
+						apply()
+					end)
+				end
+
+				-- painting (runs every frame while something is still easing) ─────
+				local function setChan(ch, ratio, c0, c1)
+					ch.Thumb.Position = UDim2.fromScale(ratio, 0.5)
+					if c0 then ch.Grad.Color = ColorSequence.new(c0, c1) end
+				end
+				paint = function()
+					local dc = Color3.fromHSV(disp.h, disp.s, disp.v)
+					local pure = Color3.fromHSV(disp.h, 1, 1)
+					sv.BackgroundColor3 = pure
+					cursor.Position = UDim2.fromScale(disp.s, 1 - disp.v)
+					cursorFill.BackgroundColor3 = dc
+					hueThumb.Position = UDim2.fromScale(disp.h, 0.5)
+					hueFill.BackgroundColor3 = pure
+					if alphaThumb then
+						alphaThumb.Position = UDim2.fromScale(disp.a, 0.5)
+						alphaFill.BackgroundColor3 = dc
+						Util.Part(alphaTrack, "Tint").BackgroundColor3 = dc
+					end
+					newHalf.BackgroundColor3 = dc
+					newHalf.BackgroundTransparency = 1 - disp.a
+					local r, g, b = dc.R, dc.G, dc.B
+					setChan(rgb[1], r, Color3.new(0, g, b), Color3.new(1, g, b))
+					setChan(rgb[2], g, Color3.new(r, 0, b), Color3.new(r, 1, b))
+					setChan(rgb[3], b, Color3.new(r, g, 0), Color3.new(r, g, 1))
+					setChan(hsv[1], disp.h)
+					setChan(hsv[2], disp.s, Color3.fromHSV(disp.h, 0, disp.v), Color3.fromHSV(disp.h, 1, disp.v))
+					setChan(hsv[3], disp.v, Color3.fromHSV(disp.h, disp.s, 0), Color3.fromHSV(disp.h, disp.s, 1))
+				end
+				updateInputs = function()
+					if not hexInput:IsFocused() then hexInput.Text = Util.ToHex(obj.Value) end
+					for _, entry in numberInputs do
+						if not entry.Input:IsFocused() then entry.Input.Text = tostring(entry.Read()) end
+					end
+				end
+				obj._refresh = function()
+					updateInputs()
+					ease()
+				end
+
+				-- tab switching ─────────────────────────────
+				local function showMode(newMode, instant)
+					mode = newMode
+					PickerMemory.Mode = newMode
+					local rgbOn = newMode == "RGB"
+					local tabTime = instant and 0 or 0.3
+					local function go(inst, props, ease_)
+						if instant then for k, val in props do inst[k] = val end else Util.Tween(inst, tabTime, props, ease_ or "Out") end
+					end
+					go(pill, { Position = UDim2.new(rgbOn and 0 or 0.5, rgbOn and 3 or 1, 0, 3) }, "Back")
+					for name, entry in tabButtons do
+						go(entry.Label, { TextColor3 = name == newMode and Theme.Current.Text or Theme.Current.Muted }, "Quad")
+					end
+					rgbGroup.Visible, hsvGroup.Visible = true, true
+					go(rgbGroup, { GroupTransparency = rgbOn and 0 or 1, Position = UDim2.fromOffset(rgbOn and 0 or -22, chanY) })
+					go(hsvGroup, { GroupTransparency = rgbOn and 1 or 0, Position = UDim2.fromOffset(rgbOn and 22 or 0, chanY) })
+					local function settle()
+						if mode ~= newMode then return end
+						rgbGroup.Visible, hsvGroup.Visible = rgbOn, not rgbOn
+					end
+					if instant then settle() else task.delay(tabTime + 0.02, settle) end
+				end
+				for name, entry in tabButtons do
+					entry.Button.Activated:Connect(function()
+						if mode == name then return end
+						Sound.Play("Tick")
+						showMode(name)
+					end)
+				end
+				showMode(mode, true)
+
+				-- drag handling ───────────────────────────────
 				Util.Drag(sv, function(pos)
 					s, v = ratioOf(sv, pos, "X"), 1 - ratioOf(sv, pos, "Y")
 					apply()
-				end, function() Util.Tween(cursor, 0.15, { Size = UDim2.fromOffset(20, 20) }, "Back") end,
-				function() Util.Tween(cursor, 0.2, { Size = UDim2.fromOffset(16, 16) }, "Quad") end)
-				Util.Drag(hue, function(pos) h = ratioOf(hue, pos, "X"); apply() end)
-				if alpha then Util.Drag(alpha, function(pos) obj.Alpha = ratioOf(alpha, pos, "X"); apply() end) end
+				end, function() Util.Tween(cursor, 0.15, { Size = UDim2.fromOffset(24, 24) }, "Back") end,
+				function() Util.Tween(cursor, 0.2, { Size = UDim2.fromOffset(18, 18) }, "Quad") end)
+				local function thumbDrag(hit, thumb, rail, onRatio)
+					Util.Drag(hit, function(pos) onRatio(ratioOf(rail, pos, "X")) end,
+						function() Util.Tween(thumb, 0.14, { Size = UDim2.fromOffset(21, 21) }, "Back") end,
+						function() Util.Tween(thumb, 0.2, { Size = UDim2.fromOffset(16, 16) }, "Quad") end)
+				end
+				thumbDrag(hueHit, hueThumb, hueRail, function(r) h = r; apply() end)
+				if alphaHit then thumbDrag(alphaHit, alphaThumb, alphaRail, function(r) obj.Alpha = r; apply() end) end
+
+				updateInputs()
+				paint()
 			end,
 		})
 	end
 
+	-- the row: click to open ───────────
 	row.Frame.Activated:Connect(function()
 		if obj.Locked then return end
 		Sound.Play("Click")
@@ -5671,7 +6751,6 @@ Elements.Create.Colorpicker = function(container, opts)
 	end
 	return Elements.Finish(obj, container, row, "element", opts)
 end
-
 -- ─────────────────────────────────────────────────────────────
 --  Paragraph
 -- ─────────────────────────────────────────────────────────────
@@ -5718,8 +6797,7 @@ Elements.Create.Code = function(container, opts)
 	Theme.Bind(box, { BackgroundColor3 = "Sidebar" })
 	Util.Corner(box, 10)
 	Util.Shade(box, 90, 0.12)
-	Util.FadeLine(box, { Position = UDim2.new(0, 0, 0, 0), Size = UDim2.new(1, 0, 0, 1), Strength = 0.45, ZIndex = 3, Thickness = 1 })
-	Util.FadeLine(box, { Position = UDim2.new(0, 0, 1, -1), Size = UDim2.new(1, 0, 0, 1), Strength = 0.25, ZIndex = 3, Thickness = 1 })
+	Edge.Attach(box, "Input", { Radius = 10, Alpha = 0.5, Contact = false, ZIndex = 4 })
 	local pad = New("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, Parent = box })
 	Util.Padding(pad, 11, 42, 11, 13)
 
@@ -5993,8 +7071,9 @@ function ConfigManager:Serialize()
 		end
 	end
 	return {
-		Version = 2, Theme = Theme.Current.Name,
+		Version = 3, Theme = Theme.Current.Name, Mode = Theme.Mode,
 		Appearance = {
+			Edge = { Mode = Edge.Mode, Style = Edge.Style, Thickness = Edge.Thickness, Strength = Edge.Strength },
 			Style = Theme.StyleOverride or "Default",
 			Animated = Theme.Animated,
 			Click = Fx.Style,
@@ -6007,9 +7086,11 @@ end
 
 function ConfigManager:Apply(data)
 	if type(data) ~= "table" then return false end
+	if data.Mode == "Dark" or data.Mode == "Light" then Theme.SetMode(data.Mode) end
 	if data.Theme and Theme.Themes[data.Theme] then Theme.Set(data.Theme) end
 	local look = data.Appearance
 	if type(look) == "table" then
+		if type(look.Edge) == "table" then Edge.Set(look.Edge) end
 		if look.Style ~= nil then Theme.SetStyle(look.Style) end
 		if look.Animated ~= nil then Theme.SetAnimated(look.Animated) end
 		if look.Click ~= nil then Fx.SetStyle(look.Click) end
@@ -6151,8 +7232,57 @@ function Window:LoadAutoload() return self.ConfigManager:LoadAutoload() end
 --    Key = {"a","b"} | "a",  Validate = function(key) -> bool, message,
 --    Title, Note/Subtitle, URL (copied by "Get key"), Buttons = {...}, Links = { {Title, URL | Callback} },
 --    SaveKey = true, MaxAttempts = nil, CloseOnFail = true, OnFail = function, Closable = true, Footer, Width, Callback = function(key)
+--    Icon      Lucide name, rbxassetid, "logo.png" (workspace file) or an https image url for the logo (default: the window icon)
+--    Banner    optional picture across the top of the card
+--    Cooldown  seconds the Verify button waits after a wrong key
+--    SuccessTitle  title shown when the key is right (default "Access granted"),  SuccessDelay  seconds before the card closes
+--    Loader    true | { Steps, Duration, ... }  shows a loading screen after the key is accepted (see Vesper:CreateLoader)
+--    Custom    function(api)  build your OWN content on the card. api.Content is a vertical list (use LayoutOrder 10+),
+--              api.Verify(text) / api.Fail(msg) / api.Succeed(key, msg) / api.SetStatus(text, "Danger", "icon") drive the animations
 --  }
+--  Without a window:  local gate = Vesper:CreateKeySystem({ ... });  local key = gate:Wait()
 -- ─────────────────────────────────────────────────────────────
+--- Swap an icon with a small pop (it shrinks away, then the new one grows in)
+local function morphIcon(img, icon, px, token)
+	if not img or not img.Parent then return end
+	local mine = (Util.Part(img, "Morph") or 0) + 1
+	Util.SetPart(img, "Morph", mine)
+	Util.Tween(img, 0.09, { Size = UDim2.fromOffset(px * 0.3, px * 0.3), ImageTransparency = 1 }, "Quad")
+	task.delay(0.1, function()
+		if not img.Parent or Util.Part(img, "Morph") ~= mine then return end
+		Icons.Apply(img, icon, px, token)
+		img.ImageTransparency = 1
+		Util.Tween(img, 0.3, { Size = UDim2.fromOffset(px, px), ImageTransparency = 0 }, "Back")
+	end)
+end
+
+--- The ring around the logo swells and springs back
+local function ringPulse(ring, base, scale)
+	if not ring or not ring.Parent then return end
+	Util.Tween(ring, 0.14, { Size = UDim2.fromOffset(base * (scale or 1.14), base * (scale or 1.14)) }, "Out")
+	task.delay(0.15, function()
+		if ring.Parent then Util.Tween(ring, 0.5, { Size = UDim2.fromOffset(base, base) }, "Elastic") end
+	end)
+end
+
+--- Types a label out letter by letter (a newer call cancels an older one)
+local function typeInto(label, text, perChar)
+	task.spawn(function()
+		local token = (Util.Part(label, "TypeToken") or 0) + 1
+		Util.SetPart(label, "TypeToken", token)
+		label.Text = text
+		label.TextTransparency = 0
+		label.MaxVisibleGraphemes = 0
+		local n = utf8.len(text) or #text
+		for i = 1, n do
+			if not label.Parent or Util.Part(label, "TypeToken") ~= token then return end
+			label.MaxVisibleGraphemes = i
+			task.wait(math.min(perChar or 0.04, 0.5 / math.max(n, 1)))
+		end
+		if label.Parent and Util.Part(label, "TypeToken") == token then label.MaxVisibleGraphemes = -1 end
+	end)
+end
+
 function Vesper._KeyGate(window, ks)
 	if type(ks) ~= "table" then ks = {} end
 	local keys = ks.Key or ks.Keys
@@ -6239,20 +7369,29 @@ function Vesper._KeyGate(window, ks)
 		Theme.Bind(card, { BackgroundColor3 = "Window" })
 		Theme.WindowGradient(card, 35)
 		pop = New("UIScale", { Scale = 0.9, Parent = holder })
-		Util.FadeLine(card, { Position = UDim2.new(0, 0, 0, 0), Size = UDim2.new(1, 0, 0, 1), Strength = 0.8, Token = "Accent", ZIndex = 8, Thickness = 1 })
 
 		-- glow behind the logo
 		local glow = New("Frame", { Name = "Glow", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 150), Active = false, Parent = card })
 		orb(glow, 0.5, 0.42, 200, "Accent", 0.5, Theme.Animated, { 0.03, 0.04 }, 6)
 
+		-- optional banner picture that fades into the card
+		if ks.Banner then
+			local banner = New("Frame", { Name = "Banner", Size = UDim2.new(1, 0, 0, 112), BackgroundTransparency = 1, ClipsDescendants = true, ZIndex = 1, Parent = card })
+			local bannerImg = New("ImageLabel", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ScaleType = Enum.ScaleType.Crop, ZIndex = 1, Parent = banner })
+			Icons.Apply(bannerImg, ks.Banner, 112)
+			local fade = New("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, ZIndex = 2, Parent = banner })
+			Theme.Bind(fade, { BackgroundColor3 = "Window" })
+			New("UIGradient", { Rotation = 90, Transparency = NumberSequence.new({ kp(0, 0.5), kp(0.7, 0.12), kp(1, 0) }), Parent = fade })
+		end
+
 		local content = New("Frame", { Name = "Content", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, ZIndex = 3, Parent = card })
-		Util.Padding(content, 28, 26, 22, 26)
+		Util.Padding(content, ks.Banner and 62 or 28, 26, 22, 26)
 		Util.List(content, 12, Enum.FillDirection.Vertical, Enum.HorizontalAlignment.Center)
 
 		-- logo with a spinning ring
 		local cluster = New("Frame", { Name = "Cluster", Size = UDim2.fromOffset(76, 76), BackgroundTransparency = 1, LayoutOrder = 1, Parent = content })
-		Fx.SpinRing(cluster, { Size = 76, Thickness = 3, Speed = 1.4, AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5) })
-		local tile = Util.MakeLogo(cluster, window.Opts.Icon or "key-round", 50, 15)
+		local ring = Fx.SpinRing(cluster, { Size = 76, Thickness = 3, Speed = 1.4, AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5) })
+		local tile = Util.MakeLogo(cluster, ks.Icon or window.Opts.Icon or "key-round", 50, 15)
 		tile.AnchorPoint, tile.Position, tile.Size = Vector2.new(0.5, 0.5), UDim2.fromScale(0.5, 0.5), UDim2.fromOffset(0, 0)
 		local logoIcon = Util.Part(tile, "Icon")
 
@@ -6276,9 +7415,9 @@ function Vesper._KeyGate(window, ks)
 		Theme.Bind(inputWrap, { BackgroundColor3 = "Input" })
 		Util.Corner(inputWrap, 11)
 		Util.Shade(inputWrap, 90, 0.12)
-		Shadow.Edge(inputWrap, { Inset = 8, Alpha = 0.75 })
-		Util.FadeLine(inputWrap, { Position = UDim2.new(0, 0, 0, 0), Size = UDim2.new(1, 0, 0, 1), Strength = 0.35, ZIndex = 3, Thickness = 1 })
-		local keyIcon = Util.Icon(inputWrap, "key-round", 16, "SubText", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 14, 0.5, 0) })
+		local inputEdge = Edge.Attach(inputWrap, "Input", { Radius = 11, Alpha = 0.55, Inset = 8, ShadowAlpha = 0.75, ZIndex = 4 })
+		local keyIcon = Util.Icon(inputWrap, "key-round", 16, "SubText", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0, 22, 0.5, 0) })
+		local iconSpin
 		local input = New("TextBox", {
 			Weight = "Medium", TextSize = 13, Position = UDim2.fromOffset(42, 0), Size = UDim2.new(1, -54, 1, 0), Text = "",
 			PlaceholderText = "Enter key...", ClearTextOnFocus = false, ClipsDescendants = true, Parent = inputWrap,
@@ -6296,11 +7435,15 @@ function Vesper._KeyGate(window, ks)
 			focused = true
 			Util.Tween(underline, 0.35, { Size = UDim2.new(1, -10, 0, 2) }, "Out")
 			Util.Tween(keyIcon, 0.2, { ImageColor3 = Theme.Current.Accent }, "Quad")
+			Util.Tween(keyIcon, 0.35, { Rotation = -14 }, "Back")
+			Edge.Level(inputEdge, 1, 0.25)
 		end)
 		input.FocusLost:Connect(function()
 			focused = false
 			Util.Tween(underline, 0.28, { Size = UDim2.new(0, 0, 0, 2) }, "Quad")
 			Util.Tween(keyIcon, 0.2, { ImageColor3 = Theme.Current.SubText }, "Quad")
+			Util.Tween(keyIcon, 0.35, { Rotation = 0 }, "Back")
+			Edge.Level(inputEdge, 0, 0.3)
 		end)
 
 		-- status line
@@ -6339,10 +7482,19 @@ function Vesper._KeyGate(window, ks)
 		local busy, attempts, lockedOut = false, 0, false
 		local verifyButton
 
+		local cooling = false
+		local function stopSpin()
+			if iconSpin then iconSpin:Cancel(); iconSpin = nil; keyIcon.Rotation = 0 end
+		end
 		local function setBusy(on)
 			busy = on
 			input.TextEditable = not on and not lockedOut
 			if on then
+				morphIcon(keyIcon, "loader-circle", 16, "Accent")
+				Edge.SetToken(inputEdge, "Accent"); Edge.Level(inputEdge, 1, 0.2)
+				task.delay(0.4, function()
+					if busy and keyIcon.Parent and not iconSpin then iconSpin = Util.Loop(keyIcon, 0.8, { Rotation = 360 }, "Linear") end
+				end)
 				scan.Visible = true
 				scan.Position = UDim2.new(-0.4, 0, 1, 0)
 				Util.Loop(scan, 0.85, { Position = UDim2.new(1, 0, 1, 0) }, "Sine", false)
@@ -6369,7 +7521,13 @@ function Vesper._KeyGate(window, ks)
 			setStatus(message or "That key isn't valid", "Danger", "circle-x")
 			Theme.Bind(underline, { BackgroundColor3 = "Danger" })
 			Util.Tween(underline, 0.25, { Size = UDim2.new(1, -10, 0, 2) }, "Out")
-			Theme.Bind(keyIcon, { ImageColor3 = "Danger" })
+			stopSpin()
+			morphIcon(keyIcon, "x", 16, "Danger")
+			Edge.SetToken(inputEdge, "Danger"); Edge.Level(inputEdge, 1, 0.12)
+			Fx.RingTone(ring, "Danger", true)
+			ringPulse(ring, 76, 1.14)
+			local verifyLabel = verifyButton and Util.Part(verifyButton, "Label")
+			if verifyLabel then verifyLabel.Text = "Try again" end
 			Fx.Flash(inputWrap, { Color = "Danger", Alpha = 0.8, Duration = 0.6, Radius = UDim.new(0, 11) })
 			task.spawn(shake)
 			Fx.Pop(logoIcon, -14)
@@ -6380,11 +7538,27 @@ function Vesper._KeyGate(window, ks)
 				Util.Tween(dot, 0.4, { Size = UDim2.fromOffset(7, 7) }, "Elastic")
 			end
 			task.delay(1.1, function()
-				if not underline.Parent then return end
+				if not underline.Parent or unlocked then return end
 				Theme.Bind(underline, { BackgroundColor3 = function(t) return t.Accent end })
-				Theme.Bind(keyIcon, { ImageColor3 = focused and "Accent" or "SubText" })
+				morphIcon(keyIcon, lockedOut and "lock" or "key-round", 16, focused and "Accent" or "SubText")
+				Edge.SetToken(inputEdge, "Stroke"); Edge.Level(inputEdge, focused and 1 or 0, 0.3)
+				if not lockedOut then Fx.RingTone(ring, nil, false) end
+				if verifyLabel and verifyLabel.Parent and not lockedOut and not cooling then verifyLabel.Text = "Verify" end
 				if not focused then Util.Tween(underline, 0.3, { Size = UDim2.new(0, 0, 0, 2) }, "Quad") end
 			end)
+			-- optional wait before the next try
+			if ks.Cooldown and ks.Cooldown > 0 and not (ks.MaxAttempts and attempts >= ks.MaxAttempts) then
+				cooling = true
+				task.spawn(function()
+					for left = math.ceil(ks.Cooldown), 1, -1 do
+						if not underline.Parent or unlocked then return end
+						if verifyLabel and verifyLabel.Parent then verifyLabel.Text = ("Wait %ds"):format(left) end
+						task.wait(1)
+					end
+					cooling = false
+					if verifyLabel and verifyLabel.Parent and not unlocked then verifyLabel.Text = "Verify" end
+				end)
+			end
 			if ks.MaxAttempts and attempts >= ks.MaxAttempts then
 				lockedOut = true
 				input.TextEditable = false
@@ -6404,21 +7578,37 @@ function Vesper._KeyGate(window, ks)
 			setStatus(message or "Key accepted", "Success", "circle-check")
 			Theme.Bind(underline, { BackgroundColor3 = "Success" })
 			Util.Tween(underline, 0.3, { Size = UDim2.new(1, -10, 0, 2) }, "Out")
+			stopSpin()
+			morphIcon(keyIcon, "check", 16, "Success")
+			Edge.SetToken(inputEdge, "Success"); Edge.Level(inputEdge, 1, 0.2)
+			Fx.RingTone(ring, "Success", true)
+			ringPulse(ring, 76, 1.2)
 			if logoIcon then
-				Icons.Apply(logoIcon, "check", 24, "AccentText")
-				Fx.Pop(logoIcon, 0)
+				morphIcon(logoIcon, "check", 24, "AccentText")
 			end
+			local verifyLabel = verifyButton and Util.Part(verifyButton, "Label")
+			if verifyLabel then verifyLabel.Text = "Unlocked" end
+			typeInto(title, Loc.Resolve(ks.SuccessTitle or "Access granted"), 0.035)
 			Util.Tween(tile, 0.35, { Size = UDim2.fromOffset(58, 58) }, "Back")
 			Fx.Burst(cluster, { X = 38, Y = 38, Count = 12, Distance = 52, Size = 4.5, Duration = 0.8, ZIndex = 20 })
 			Fx.Flash(card, { Color = "Success", Alpha = 0.9, Duration = 0.8, Radius = UDim.new(0, 18) })
-			task.delay(0.75, function()
+			task.delay(ks.SuccessDelay or 1.05, function()
 				unlocked = false
+				if window.Destroyed then return end
+				if ks.Loader then
+					-- a loading screen between the key and the window
+					local cfg = type(ks.Loader) == "table" and table.clone(ks.Loader) or {}
+					cfg.Icon = cfg.Icon or ks.Icon or window.Opts.Icon
+					cfg.Title = cfg.Title or "Loading"
+					dismiss()
+					Vesper:CreateLoader(cfg):Wait()
+				end
 				unlock(key)
 			end)
 		end
 
 		local function verify()
-			if busy or unlocked or lockedOut then return end
+			if busy or unlocked or lockedOut or cooling then return end
 			local text = Util.Trim(input.Text)
 			if text == "" then
 				attempts -= 1 -- an empty box is not an attempt
@@ -6491,6 +7681,29 @@ function Vesper._KeyGate(window, ks)
 			end)
 		end
 
+		-- Custom: hide the default input / buttons and let the caller build their own
+		if ks.Custom then
+			for _, child in content:GetChildren() do
+				if child:IsA("GuiObject") and (child.LayoutOrder == 4 or child.LayoutOrder >= 6 and child.LayoutOrder <= 9) then child.Visible = false end
+			end
+			local api = {
+				Content = content, Card = card, Holder = holder, Window = window, Vesper = Vesper, MakeButton = Util.MakeButton,
+				SetStatus = setStatus, Fail = fail, Succeed = succeed, Validate = validate,
+				Verify = function(text)
+					if busy or unlocked or lockedOut then return end
+					setBusy(true)
+					local ok, message = validate(text or "")
+					if not card or not card.Parent then return end
+					setBusy(false)
+					if ok then succeed(Util.Trim(text or ""), message) else fail(message) end
+				end,
+				Close = function()
+					if not window.Destroyed then window:Destroy() end
+				end,
+			}
+			Util.Fire(ks.Custom, api)
+		end
+
 		-- entrance
 		Sound.Play("Open")
 		Util.Tween(bg, 0.55, { GroupTransparency = 0 }, "Quad")
@@ -6518,6 +7731,303 @@ function Vesper._KeyGate(window, ks)
 	end)
 end
 
+-- ─────────────────────────────────────────────────────────────
+--  Standalone key system + loader (no window needed)
+--
+--    local gate = Vesper:CreateKeySystem({ Title = "My Hub", Key = "abc", Icon = "logo.png", Callback = function(key) end })
+--    local key = gate:Wait()            -- yields until the key is accepted (nil when the card was closed)
+--
+--    local ld = Vesper:CreateLoader({ Title = "My Hub", Steps = { "Checking game", "Loading modules" }, Duration = 3 })
+--    ld:Wait()                          -- auto mode: yields until it is done
+--    manual:  ld:Step("Fetching data", 0.3)  ld:SetProgress(0.6)  ld:SetStatus("text")  ld:Complete("Ready")  ld:Fail("Could not load")
+--
+--  Both take the same look as the key card inside a window, so they match the rest of your interface.
+-- ─────────────────────────────────────────────────────────────
+Vesper._Screens = Vesper._Screens or {}
+
+local function screenScale(host, user)
+	host:OnViewport(function()
+		local vp = Util.Viewport()
+		host:SetScale(Util.Clamp(math.min(vp.X / 700, vp.Y / 640), 0.62, 1.15) * (user or 1))
+	end)
+end
+
+--- Key card without a window. Returns { Unlocked, Closed, Key, Wait(), Destroy() }
+function Vesper:CreateKeySystem(ks)
+	if type(ks) ~= "table" then ks = {} end
+	Layer.Init()
+	local gate = { Unlocked = false, Closed = false, Key = nil, _waiters = {} }
+	local host = Host.new(1500)
+	screenScale(host, ks.Scale)
+	table.insert(Vesper._Screens, host)
+
+	local function finish(key)
+		if gate.Unlocked or gate.Closed then return end
+		if key then gate.Unlocked, gate.Key = true, key else gate.Closed = true end
+		for _, thread in gate._waiters do task.spawn(thread, gate.Key) end
+		table.clear(gate._waiters)
+		task.delay(1.4, function() host:Destroy() end)
+	end
+
+	-- the key gate talks to a window; this stands in for one
+	local proxy = { Host = host, Folder = ks.Folder or "Vesper", Opts = { Icon = ks.Icon }, Destroyed = false, _locked = true }
+	function proxy:Show() proxy.Destroyed = true; finish(gate.Key) end
+	function proxy:Destroy() proxy.Destroyed = true; finish(nil) end
+
+	local options = table.clone(ks)
+	options.Callback = function(key)
+		gate.Key = key
+		if ks.Callback then Util.Fire(ks.Callback, key) end
+	end
+
+	function gate:Wait()
+		if gate.Unlocked or gate.Closed then return gate.Key end
+		table.insert(gate._waiters, coroutine.running())
+		return coroutine.yield()
+	end
+	function gate:Destroy()
+		proxy.Destroyed = true
+		finish(nil)
+		host:Destroy()
+	end
+
+	Vesper._KeyGate(proxy, options)
+	return gate
+end
+
+--- Loading screen. See the notes at the top of this file.
+--- cfg = { Title, Subtitle, Status, Icon, Banner, Steps, Duration, Manual, Percent = true, Width, Background, Callback, DoneText, DoneTitle }
+function Vesper:CreateLoader(cfg)
+	if type(cfg) ~= "table" then cfg = { Title = tostring(cfg or "Loading") } end
+	Layer.Init()
+	local loader = { Done = false, Failed = false, Progress = 0, _waiters = {} }
+	local host = Host.new(1500)
+	screenScale(host, cfg.Scale)
+	table.insert(Vesper._Screens, host)
+	local CARD_W = Util.Clamp(cfg.Width or 380, 300, 520)
+
+	-- backdrop + card (same construction as the key card)
+	local gate = New("Frame", { Name = "Loader", BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1), ZIndex = 50, Active = true, Parent = host.Root })
+	local bg = New("CanvasGroup", { Name = "Bg", BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1), GroupTransparency = 1, Parent = gate })
+	local base = New("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = BLACK, BackgroundTransparency = cfg.Background == false and 0.35 or 0.05, Parent = bg })
+	Theme.Bind(base, { BackgroundColor3 = function(t) return t.Window3:Lerp(BLACK, 0.5) end })
+	if cfg.Background ~= false then Fx.Backdrop(bg, 1) end
+	local vignette = New("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = BLACK, ZIndex = 2, Active = false, Parent = bg })
+	New("UIGradient", { Rotation = 90, Transparency = NumberSequence.new({ kp(0, 0.35), kp(0.5, 0.85), kp(1, 0.3) }), Parent = vignette })
+
+	local holder, card = Util.Surface(gate, {
+		Name = "LoaderCard", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.new(0, CARD_W, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y, ZIndex = 5,
+	}, 18, true)
+	Theme.Bind(card, { BackgroundColor3 = "Window" })
+	Theme.WindowGradient(card, 35)
+	local pop = New("UIScale", { Scale = 0.9, Parent = holder })
+
+	local glow = New("Frame", { Name = "Glow", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 150), Active = false, Parent = card })
+	orb(glow, 0.5, 0.42, 200, "Accent", 0.5, Theme.Animated, { 0.03, 0.04 }, 6)
+	if cfg.Banner then
+		local banner = New("Frame", { Name = "Banner", Size = UDim2.new(1, 0, 0, 104), BackgroundTransparency = 1, ClipsDescendants = true, ZIndex = 1, Parent = card })
+		local img = New("ImageLabel", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ScaleType = Enum.ScaleType.Crop, Parent = banner })
+		Icons.Apply(img, cfg.Banner, 104)
+		local fade = New("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, ZIndex = 2, Parent = banner })
+		Theme.Bind(fade, { BackgroundColor3 = "Window" })
+		New("UIGradient", { Rotation = 90, Transparency = NumberSequence.new({ kp(0, 0.5), kp(0.7, 0.12), kp(1, 0) }), Parent = fade })
+	end
+
+	local content = New("Frame", { Name = "Content", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, ZIndex = 3, Parent = card })
+	Util.Padding(content, cfg.Banner and 58 or 28, 26, 24, 26)
+	Util.List(content, 12, Enum.FillDirection.Vertical, Enum.HorizontalAlignment.Center)
+
+	local cluster = New("Frame", { Name = "Cluster", Size = UDim2.fromOffset(76, 76), BackgroundTransparency = 1, LayoutOrder = 1, Parent = content })
+	local ring = Fx.SpinRing(cluster, { Size = 76, Thickness = 3, Speed = 1.1, AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5) })
+	local tile = Util.MakeLogo(cluster, cfg.Icon or "sparkles", 50, 15)
+	tile.AnchorPoint, tile.Position, tile.Size = Vector2.new(0.5, 0.5), UDim2.fromScale(0.5, 0.5), UDim2.fromOffset(0, 0)
+	local logoIcon = Util.Part(tile, "Icon")
+
+	local title = New("TextLabel", {
+		Weight = "SemiBold", TextSize = 20, Size = UDim2.new(1, 0, 0, 26), TextXAlignment = Enum.TextXAlignment.Center, LayoutOrder = 2, Parent = content,
+	})
+	Theme.Bind(title, { TextColor3 = "Text" })
+	local titleText = Loc.Resolve(cfg.Title or "Loading")
+	title.Text = titleText
+	title.MaxVisibleGraphemes = 0
+
+	local note = New("TextLabel", {
+		TextSize = 12, TextWrapped = true, RichText = true, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+		TextXAlignment = Enum.TextXAlignment.Center, LayoutOrder = 3, TextTransparency = 1, Parent = content,
+	})
+	Theme.Bind(note, { TextColor3 = "SubText" })
+	Util.SetText(note, cfg.Subtitle or cfg.Note or "")
+	note.Visible = (cfg.Subtitle or cfg.Note) ~= nil
+
+	local statusLabel = New("TextLabel", {
+		Weight = "Medium", TextSize = 12.5, Size = UDim2.new(1, 0, 0, 18), TextXAlignment = Enum.TextXAlignment.Center, LayoutOrder = 4, Text = cfg.Status or "Starting…", Parent = content,
+	})
+	Theme.Bind(statusLabel, { TextColor3 = "SubText" })
+
+	local barRow = New("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 20), LayoutOrder = 5, Parent = content })
+	local track = New("Frame", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.fromScale(0, 0.5), Size = UDim2.new(1, cfg.Percent == false and 0 or -46, 0, 8), BackgroundColor3 = WHITE, Parent = barRow })
+	Theme.Bind(track, { BackgroundColor3 = "Input" })
+	Util.Corner(track, 4)
+	Util.Shade(track, 90, 0.08)
+	local fill = New("Frame", { Size = UDim2.fromScale(0, 1), BackgroundColor3 = WHITE, ClipsDescendants = true, Parent = track })
+	Util.Corner(fill, 4)
+	Theme.AccentGradient(fill, 0)
+	local shimmer = New("Frame", { Size = UDim2.fromScale(0.5, 1), Position = UDim2.fromScale(-0.6, 0), BackgroundColor3 = WHITE, BackgroundTransparency = 0.55, Parent = fill })
+	New("UIGradient", { Transparency = NumberSequence.new({ kp(0, 1), kp(0.5, 0), kp(1, 1) }), Parent = shimmer })
+	local shimmerTween = Util.Loop(shimmer, 1.3, { Position = UDim2.fromScale(1.1, 0) }, "Sine", false)
+	local percent
+	if cfg.Percent ~= false then
+		percent = New("TextLabel", {
+			Weight = "SemiBold", TextSize = 12, AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.fromScale(1, 0.5), Size = UDim2.fromOffset(40, 18),
+			TextXAlignment = Enum.TextXAlignment.Right, Text = "0%", Parent = barRow,
+		})
+		Theme.Bind(percent, { TextColor3 = "Text" })
+	end
+
+	-- the bar eases toward its target every frame
+	local smoother = Util.Smoother(0, 9, function(value)
+		if not fill.Parent then return end
+		fill.Size = UDim2.fromScale(Util.Clamp(value, 0, 1), 1)
+		if percent then percent.Text = string.format("%d%%", math.floor(value * 100 + 0.5)) end
+	end)
+
+	local statusToken = 0
+	function loader:SetStatus(text)
+		if not statusLabel.Parent then return end
+		statusToken += 1
+		local mine = statusToken
+		Util.Tween(statusLabel, 0.12, { TextTransparency = 1, Position = UDim2.fromOffset(0, -4) }, "Quad")
+		task.delay(0.13, function()
+			if mine ~= statusToken or not statusLabel.Parent then return end
+			Util.SetText(statusLabel, text)
+			statusLabel.Position = UDim2.fromOffset(0, 5)
+			Util.Tween(statusLabel, 0.22, { TextTransparency = 0, Position = UDim2.fromOffset(0, 0) }, "Out")
+		end)
+	end
+	function loader:SetProgress(p, instant)
+		loader.Progress = Util.Clamp(p, 0, 1)
+		smoother.Set(loader.Progress, instant)
+	end
+	--- show a step (and move the bar to `progress` when given)
+	function loader:Step(text, progress)
+		loader:SetStatus(text)
+		if progress then loader:SetProgress(progress) end
+	end
+
+	local function finish()
+		if loader.Done then return end
+		loader.Done = true
+		for _, thread in loader._waiters do task.spawn(thread, not loader.Failed) end
+		table.clear(loader._waiters)
+	end
+	local exited = false
+	local function exit()
+		if exited then return end
+		exited = true
+		Util.FadeCanvas(card, 1, 0.3, "Quad")
+		Util.Tween(pop, 0.35, { Scale = 1.07 }, "Quad")
+		Util.Tween(bg, 0.5, { GroupTransparency = 1 }, "Quad")
+		task.delay(0.8, function() host:Destroy() end)
+	end
+
+	function loader:Complete(text)
+		if loader.Done then return end
+		loader:SetProgress(1)
+		loader:SetStatus(text or cfg.DoneText or "Ready")
+		Sound.Play("Success")
+		task.delay(0.6, function()
+			if not ring.Parent then return end
+			Fx.RingTone(ring, "Success", true)
+			ringPulse(ring, 76, 1.2)
+			if logoIcon then morphIcon(logoIcon, "check", 24, "AccentText") end
+			Fx.Burst(cluster, { X = 38, Y = 38, Count = 12, Distance = 56, Size = 4.5, Duration = 0.8, ZIndex = 20 })
+			Fx.Flash(card, { Color = "Success", Alpha = 0.92, Duration = 0.8, Radius = UDim.new(0, 18) })
+			if cfg.DoneTitle then typeInto(title, Loc.Resolve(cfg.DoneTitle), 0.035) end
+			task.delay(cfg.DoneDelay or 0.9, function()
+				exit()
+				if cfg.Callback then Util.Fire(cfg.Callback) end
+				finish()
+			end)
+		end)
+	end
+
+	function loader:Fail(text)
+		if loader.Done then return end
+		loader.Failed = true
+		Sound.Play("Error")
+		if shimmerTween then shimmerTween:Cancel() end
+		loader:SetStatus(text or "Something went wrong")
+		Theme.Bind(statusLabel, { TextColor3 = "Danger" })
+		Fx.RingTone(ring, "Danger", true)
+		ringPulse(ring, 76, 1.14)
+		if logoIcon then morphIcon(logoIcon, "x", 24, "AccentText") end
+		Fx.Flash(card, { Color = "Danger", Alpha = 0.9, Duration = 0.7, Radius = UDim.new(0, 18) })
+		task.spawn(function()
+			for _, dx in { -12, 12, -8, 8, -4, 4, 0 } do
+				if not holder.Parent then return end
+				Util.Tween(holder, 0.05, { Position = UDim2.new(0.5, dx, 0.5, 0) }, "Quad")
+				task.wait(0.05)
+			end
+		end)
+		if cfg.OnFail then Util.Fire(cfg.OnFail, text) end
+		finish()
+		if cfg.CloseOnFail ~= false then task.delay(cfg.FailDelay or 2.2, exit) end
+	end
+
+	function loader:Wait()
+		if loader.Done then return not loader.Failed end
+		table.insert(loader._waiters, coroutine.running())
+		return coroutine.yield()
+	end
+	function loader:Destroy()
+		exit()
+		smoother.Destroy()
+		finish()
+	end
+
+	-- entrance
+	Sound.Play("Open")
+	Util.Tween(bg, 0.55, { GroupTransparency = 0 }, "Quad")
+	Util.FadeCanvas(card, 0, 0.35, "Out")
+	Util.Tween(pop, 0.5, { Scale = 1 }, "Back")
+	task.delay(0.12, function() if tile.Parent then Util.Tween(tile, 0.55, { Size = UDim2.fromOffset(50, 50) }, "Back") end end)
+	task.delay(0.3, function() if note.Parent then Util.Tween(note, 0.5, { TextTransparency = 0 }, "Quad") end end)
+	task.delay(0.25, function() if title.Parent then typeInto(title, titleText, 0.04) end end)
+	task.delay(0.5, function() if not loader.Done and loader.Progress == 0 then loader:SetProgress(cfg.Initial or 0.04) end end)
+
+	-- auto mode: spread the steps over the duration
+	local steps = cfg.Steps
+	if type(steps) == "table" and #steps > 0 and cfg.Manual ~= true then
+		task.spawn(function()
+			local total = cfg.Duration or math.max(2, #steps * 0.9)
+			task.wait(0.6)
+			for i, text in steps do
+				if loader.Done then return end
+				loader:Step(type(text) == "table" and text.Text or text)
+				local to = i / #steps
+				loader:SetProgress(math.max(to - 0.06, loader.Progress))
+				task.wait(total / #steps * (0.7 + math.random() * 0.6))
+				if loader.Done then return end
+				loader:SetProgress(to * 0.97)
+			end
+			loader:Complete()
+		end)
+	elseif cfg.Duration and cfg.Manual ~= true then
+		task.spawn(function()
+			task.wait(0.6)
+			local t0 = os.clock()
+			while not loader.Done do
+				local a = Util.Clamp((os.clock() - t0) / cfg.Duration, 0, 1)
+				loader:SetProgress(a)
+				if a >= 1 then break end
+				task.wait(0.05)
+			end
+			loader:Complete()
+		end)
+	end
+	return loader
+end
 -- ─────────────────────────────────────────────────────────────
 --  Built-in tabs: Themes · Configs · Icons · About
 --  They live at the bottom of the sidebar.
@@ -6558,8 +8068,7 @@ function Window:AddThemesTab()
 	Theme.Bind(card, { BackgroundColor3 = "Card" })
 	Util.Corner(card, 12)
 	Util.Shade(card, 90, 0.07)
-	Shadow.Edge(card, { Inset = 9, Alpha = 0.84 })
-	Util.FadeLine(card, { Position = UDim2.new(0, 0, 0, 0), Size = UDim2.new(1, 0, 0, 1), Strength = 0.26, ZIndex = 4 })
+	Edge.Attach(card, "Card", { Radius = 12, Inset = 9, ShadowAlpha = 0.84, Alpha = 0.42, ZIndex = 4 })
 	local pad = New("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, Parent = card })
 	Util.Padding(pad, 12, 14, 14, 14)
 	Util.List(pad, 12)
@@ -6581,6 +8090,9 @@ function Window:AddThemesTab()
 		local current = Theme.Current.Name
 		nameLabel.Text = current
 		for name, s in swatches do
+			local def = Theme.Themes[name]
+			Util.Tween(s.Base, 0.3, { BackgroundColor3 = def.Window2 }, "Quad")
+			s.Grad.Color = ColorSequence.new(def.Accent, def.Accent2)
 			local on = name == current
 			Util.Tween(s.Halo, 0.25, { BackgroundTransparency = on and 0.72 or 1, Size = UDim2.fromOffset(on and 40 or 30, on and 40 or 30) }, "Back")
 			Util.Tween(s.Check, 0.2, { ImageTransparency = on and 0 or 1 }, "Quad")
@@ -6599,10 +8111,10 @@ function Window:AddThemesTab()
 		Util.Shade(base, 90, 0.18)
 		local dot = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(20, 20), BackgroundColor3 = WHITE, ZIndex = 3, Parent = btn })
 		Util.Corner(dot, 20)
-		New("UIGradient", { Rotation = 45, Color = ColorSequence.new(accent, accent2), Parent = dot })
+		local dotGrad = New("UIGradient", { Rotation = 45, Color = ColorSequence.new(accent, accent2), Parent = dot })
 		local check = Util.Icon(dot, "check", 12, WHITE, { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), ImageTransparency = 1, ZIndex = 4 })
 		check.ImageColor3 = (Util.Luminance(accent) + Util.Luminance(accent2)) / 2 > 0.62 and Color3.fromRGB(18, 18, 22) or WHITE
-		swatches[name] = { Halo = halo, Check = check }
+		swatches[name] = { Halo = halo, Check = check, Base = base, Grad = dotGrad }
 
 		btn.MouseEnter:Connect(function()
 			nameLabel.Text = name
@@ -6624,6 +8136,13 @@ function Window:AddThemesTab()
 	Theme.Watch(card, function() paint() end)
 
 	local controls = {}
+
+	-- Mode ---------------------------------------------------------
+	local appearance = tab:Section({ Title = "Appearance", Icon = "sun-moon" })
+	controls.mode = appearance:Segmented({
+		Title = "Mode", Desc = "Dark or light. The theme colour stays the same, only the surfaces change.", Icon = "sun-moon",
+		Values = { "Dark", "Light" }, Default = Theme.Mode, Callback = function(v) Vesper:SetMode(v) end,
+	})
 
 	-- Background ---------------------------------------------------
 	local look = tab:Section({ Title = "Background", Icon = "layers" })
@@ -6660,6 +8179,25 @@ function Window:AddThemesTab()
 	controls.lineColor = lines:Dropdown({
 		Title = "Line color", Icon = "paintbrush", Values = { "Stroke", "Accent" }, Default = Lines.Color, SearchBar = false,
 		Callback = function(v) Vesper:SetLines({ Color = v }) end,
+	})
+
+	-- Strokes -----------------------------------------------------------
+	local strokes = tab:Section({ Title = "Strokes", Icon = "frame" })
+	controls.edgeMode = strokes:Dropdown({
+		Title = "Edge style", Desc = "Strokes hug the corners and fade out. Auto picks what suits each part, or force Stroke, Shadow, Both or None.",
+		Icon = "frame", Values = Edge.Modes, Default = Edge.Mode, SearchBar = false, Callback = function(v) Vesper:SetEdge({ Mode = v }) end,
+	})
+	controls.edgeStyle = strokes:Dropdown({
+		Title = "Stroke shape", Desc = "Where the stroke runs around a corner", Icon = "spline", Values = Edge.Styles, Default = Edge.Style, SearchBar = false,
+		Callback = function(v) Vesper:SetEdge({ Style = v }) end,
+	})
+	controls.edgeThickness = strokes:Slider({
+		Title = "Stroke thickness", Icon = "ruler", Min = 1, Max = 3, Step = 0.5, Suffix = "px", Default = Edge.Thickness, ShowDefault = false,
+		Callback = function(v) Vesper:SetEdge({ Thickness = v }) end,
+	})
+	controls.edgeStrength = strokes:Slider({
+		Title = "Stroke strength", Desc = "100% is how they were designed", Icon = "contrast", Min = 0, Max = 200, Step = 10, Suffix = "%",
+		Default = math.floor(Edge.Strength / 0.5 * 100 + 0.5), Callback = function(v) Vesper:SetEdge({ Strength = v / 200 }) end,
 	})
 
 	-- Depth -------------------------------------------------------------
@@ -6738,6 +8276,11 @@ function Window:AddThemesTab()
 
 	-- keeps the controls honest after a config was loaded
 	self._syncAppearance = function()
+		controls.mode:Set(Theme.Mode, true)
+		controls.edgeMode:Set(Edge.Mode, true)
+		controls.edgeStyle:Set(Edge.Style, true)
+		controls.edgeThickness:Set(Edge.Thickness, true)
+		controls.edgeStrength:Set(Edge.Strength / 0.5 * 100, true)
 		controls.style:Set(Theme.StyleOverride or "Default", true)
 		controls.animated:Set(Theme.Animated, true)
 		controls.lineStyle:Set(Lines.Style, true)
@@ -6879,8 +8422,7 @@ function Window:AddIconsTab()
 	Theme.Bind(card, { BackgroundColor3 = "Card" })
 	Util.Corner(card, 12)
 	Util.Shade(card, 90, 0.07)
-	Shadow.Edge(card, { Inset = 9, Alpha = 0.84 })
-	Util.FadeLine(card, { Position = UDim2.new(0, 0, 0, 0), Size = UDim2.new(1, 0, 0, 1), Strength = 0.26, ZIndex = 4 })
+	Edge.Attach(card, "Card", { Radius = 12, Inset = 9, ShadowAlpha = 0.84, Alpha = 0.42, ZIndex = 4 })
 	local pad = New("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, Parent = card })
 	Util.Padding(pad, 12, 12, 14, 12)
 	Util.List(pad, 10)
@@ -6956,9 +8498,775 @@ function Window:AddAboutTab(about)
 		Title = "Vesper UI", Icon = "sparkles",
 		Content = "Version " .. Vesper.Version .. "  ·  Icons by Lucide (ISC license)",
 	})
+
+	-- Credits: the developer of the library and the accounts that own it. about = { Credits = false } hides them,
+	-- about = { Profiles = { { Username = "...", Tags = {"..."} } } } shows your own accounts instead.
+	if about.Credits ~= false then
+		local credits = tab:Section({ Title = "Credits", Icon = "heart" })
+		credits:Paragraph({
+			Title = "Developer", Icon = "code-xml",
+			Content = "<b>wheizx</b> is the developer of Vesper UI.\nDiscord: <b>wheizx</b> (loader)  ·  Community: <b>Vesper UI</b>",
+			Buttons = {
+				{ Title = "Copy Discord", Icon = "copy", Variant = "Primary", Callback = function()
+					local ok = Util.Copy("wheizx")
+					Vesper:Notify({ Title = ok and "Copied" or "Discord", Content = "wheizx", Type = "Success", Duration = 2.5 })
+				end },
+			},
+		})
+		local owners = about.Profiles or {
+			{ Username = "meterzzalt", Owner = true, Tags = { "Owner" }, Subtitle = "Owned by wheizx" },
+			{ Username = "yayelera23", Owner = true, Tags = { "Owner" }, Subtitle = "Owned by wheizx" },
+		}
+		for _, profile in owners do credits:Profile(profile) end
+	end
 	return tab
 end
 
+-- ─────────────────────────────────────────────────────────────
+--  New elements + floating pieces
+--    Section:Profile({ Username | UserId, Nickname, Tags, Subtitle, Avatar = "Bust"|"Headshot"|"Full"|"None", Image, Stats, Owner })
+--    Section:Scanner({ Title, Desc, Steps | Run = function(scan), Duration, ButtonText })
+--    Section:Graph({ Title, Get = function() return n end, Interval, Points, Min, Max, Format, Unit })
+--    Section:Custom({ Title, Height, Build = function(frame, api) end })        build anything you like inside a card
+--    Vesper:CreateHUD({ Title, Icon, Position, Items = { "FPS", "Ping", "Time", ... } })
+--    Vesper:GetAPI()                                                              the building blocks the library itself uses
+-- ─────────────────────────────────────────────────────────────
+
+--- A tone is a theme token name ("Success", "Warning", "Danger", "Info", "Accent", "Muted") or a Color3
+local function toneColor(tone, t)
+	t = t or Theme.Current
+	if typeof(tone) == "Color3" then return tone end
+	return t[tone or "Accent"] or t.Accent
+end
+local function toneToken(tone)
+	if typeof(tone) == "Color3" then return function() return tone end end
+	return tone or "Accent"
+end
+
+--- A small rounded label (icon + text) with a corner stroke
+local function makeChip(parent, text, icon, tone, order)
+	local chip = New("Frame", {
+		Name = "Chip", Size = UDim2.new(0, 0, 0, 22), AutomaticSize = Enum.AutomaticSize.X, BackgroundColor3 = WHITE, LayoutOrder = order or 0, Parent = parent,
+	})
+	Theme.Bind(chip, { BackgroundColor3 = function(t) return t.Input:Lerp(toneColor(tone, t), 0.16) end })
+	Util.Corner(chip, 11)
+	Util.Padding(chip, 0, 9, 0, icon and 7 or 9)
+	Util.List(chip, 5, Enum.FillDirection.Horizontal, Enum.HorizontalAlignment.Center, Enum.VerticalAlignment.Center)
+	local edge = Edge.Attach(chip, "Chip", { Radius = 11, Alpha = 0.6, Contact = false, Token = function(t) return toneColor(tone, t):Lerp(t.Stroke, 0.3) end, ZIndex = 4 })
+	local img
+	if icon then img = Util.Icon(chip, icon, 12, toneToken(tone), { LayoutOrder = 1 }) end
+	local label = New("TextLabel", { Weight = "SemiBold", TextSize = 11, Size = UDim2.new(0, 0, 1, 0), AutomaticSize = Enum.AutomaticSize.X, LayoutOrder = 2, Parent = chip })
+	Theme.Bind(label, { TextColor3 = toneToken(tone) })
+	Util.SetText(label, text)
+	return chip, label, img, edge
+end
+
+-- ─────────────────────────────────────────────────────────────
+--  Profile (avatar visualizer)
+-- ─────────────────────────────────────────────────────────────
+local THUMBS = {
+	Bust = { Type = "AvatarBust", W = 180 }, Headshot = { Type = "AvatarHeadShot", W = 150 }, Full = { Type = "Avatar", W = 420 },
+}
+
+local function thumbUrl(userId, kind)
+	local cfg = THUMBS[kind] or THUMBS.Bust
+	return ("rbxthumb://type=%s&id=%d&w=%d&h=%d"):format(cfg.Type, userId, cfg.W, cfg.W)
+end
+
+--- Finds the user id, display name (nickname) and username. Yields; call it from a task.
+local function lookupUser(username, userId)
+	local id, display, name = userId, nil, username
+	if not id and username and username ~= "" then
+		local inGame = Players:FindFirstChild(username)
+		if inGame and inGame:IsA("Player") then
+			id, display, name = inGame.UserId, inGame.DisplayName, inGame.Name
+		else
+			local ok, result = pcall(function() return Players:GetUserIdFromNameAsync(username) end)
+			if ok and result then id = result end
+		end
+	end
+	if id and (not display or not name) then
+		local okInfo, infos = pcall(function() return Players:GetUserInfosByUserIdsAsync({ id }) end)
+		if okInfo and type(infos) == "table" and infos[1] then
+			display, name = infos[1].DisplayName, infos[1].Username
+		else
+			local okName, result = pcall(function() return Players:GetNameFromUserIdAsync(id) end)
+			if okName and result then name = result end
+		end
+	end
+	return id, display, name
+end
+
+Elements.Create.Profile = function(container, opts)
+	local copy = { Title = opts.Nickname or opts.Username or opts.Title or "Profile", Desc = opts.Subtitle, Flag = opts.Flag, Visible = opts.Visible, Search = opts.Search, Edge = opts.Edge }
+	local row = Elements.Row(container, copy, 0, 0, true)
+	row.TitleLabel.Visible = false
+	row.DescLabel.Visible = false
+	local obj = { Type = "Profile", Username = opts.Username, UserId = opts.UserId, Nickname = opts.Nickname }
+	local avatarKind = opts.Avatar == nil and "Bust" or opts.Avatar
+	local compact = opts.Compact == true
+	local AV = compact and 56 or 80
+
+	local card = New("Frame", { Name = "Profile", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, LayoutOrder = 3, Parent = row.Left })
+	Util.List(card, 16, Enum.FillDirection.Horizontal, Enum.HorizontalAlignment.Left, Enum.VerticalAlignment.Center)
+
+	-- avatar: a ring that sweeps once while loading, then settles
+	local avatar
+	if avatarKind ~= "None" or opts.Image then
+		avatar = New("Frame", { Name = "Avatar", Size = UDim2.fromOffset(AV, AV), BackgroundTransparency = 1, LayoutOrder = 1, Parent = card })
+		local ring = Fx.SpinRing(avatar, { Size = AV, Thickness = 2.5, Speed = 1.8, AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5) })
+		local disc = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(AV - 12, AV - 12), BackgroundColor3 = WHITE, ClipsDescendants = true, ZIndex = 2, Parent = avatar })
+		Theme.Bind(disc, { BackgroundColor3 = "Input" })
+		Util.Corner(disc, AV)
+		local img = New("ImageLabel", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ImageTransparency = 1, ScaleType = Enum.ScaleType.Crop, ZIndex = 3, Parent = disc })
+		local pulse = Util.Loop(disc, 0.9, { BackgroundTransparency = 0.35 }, "Sine", true)
+		local function show(url)
+			img.Image = url
+			local function reveal()
+				if not img.Parent then return end
+				if pulse then pulse:Cancel(); pulse = nil end
+				disc.BackgroundTransparency = 0
+				Util.Tween(img, 0.45, { ImageTransparency = 0 }, "Quad")
+				Fx.RingTone(ring, nil, true)
+			end
+			if img.IsLoaded then reveal() else
+				local conn
+				conn = img:GetPropertyChangedSignal("IsLoaded"):Connect(function()
+					if img.IsLoaded then conn:Disconnect(); reveal() end
+				end)
+				task.delay(6, function() if conn then conn:Disconnect(); reveal() end end)
+			end
+		end
+		obj._showAvatar = show
+		if opts.Image then
+			local data = Icons.Resolve(opts.Image, AV)
+			if data and data.Pending then Icons.Apply(img, opts.Image, AV); Util.Tween(img, 0.45, { ImageTransparency = 0 }, "Quad") else show(data and data.Image or tostring(opts.Image)) end
+		end
+		if opts.Owner then
+			local badge = New("Frame", { AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, 2, 1, 2), Size = UDim2.fromOffset(22, 22), BackgroundColor3 = WHITE, ZIndex = 6, Parent = avatar })
+			Theme.AccentGradient(badge, 45)
+			Util.Corner(badge, 22)
+			Edge.Attach(badge, "Chip", { Radius = 22, Alpha = 0.7, Inset = 3, ShadowAlpha = 0.7, ZIndex = 7 })
+			Util.Icon(badge, "crown", 12, "AccentText", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), ZIndex = 8 })
+		end
+	end
+
+	local info = New("Frame", { Name = "Info", BackgroundTransparency = 1, Size = UDim2.new(1, avatar and -(AV + 16) or 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, LayoutOrder = 2, Parent = card })
+	Util.List(info, 4, Enum.FillDirection.Vertical, Enum.HorizontalAlignment.Left, Enum.VerticalAlignment.Center)
+	local nameLabel = New("TextLabel", {
+		Weight = "SemiBold", TextSize = compact and 15 or 18, TextTruncate = Enum.TextTruncate.AtEnd, Size = UDim2.new(1, 0, 0, compact and 20 or 24),
+		LayoutOrder = 1, Parent = info,
+	})
+	Theme.Bind(nameLabel, { TextColor3 = "Text" })
+	local handle = New("TextLabel", { TextSize = 12.5, TextTruncate = Enum.TextTruncate.AtEnd, Size = UDim2.new(1, 0, 0, 16), LayoutOrder = 2, Parent = info })
+	Theme.Bind(handle, { TextColor3 = "SubText" })
+	local tagRow = New("Frame", { Name = "Tags", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, LayoutOrder = 3, Parent = info })
+	local tagList = Util.List(tagRow, 6, Enum.FillDirection.Horizontal, Enum.HorizontalAlignment.Left, Enum.VerticalAlignment.Center)
+	tagList.Wraps = true
+	local subLabel = New("TextLabel", { TextSize = 12, TextWrapped = true, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, LayoutOrder = 4, Visible = false, Parent = info })
+	Theme.Bind(subLabel, { TextColor3 = "Muted" })
+	local statsRow = New("Frame", { Name = "Stats", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, LayoutOrder = 5, Visible = false, Parent = info })
+	local statList = Util.List(statsRow, 16, Enum.FillDirection.Horizontal, Enum.HorizontalAlignment.Left, Enum.VerticalAlignment.Top)
+	statList.Wraps = true
+
+	function obj:SetTags(tags)
+		for _, c in tagRow:GetChildren() do if c:IsA("GuiObject") then c:Destroy() end end
+		for i, tag in tags or {} do
+			if type(tag) == "string" then tag = { Text = tag } end
+			local text = tag.Text or tag.Title or ""
+			local icon, tone = tag.Icon, tag.Color or tag.Tone or "Accent"
+			if not tag.Icon and string.lower(text) == "owner" then icon = "crown" end
+			makeChip(tagRow, text, icon, tone, i)
+		end
+		tagRow.Visible = tags ~= nil and #tags > 0
+	end
+	function obj:SetStats(stats)
+		for _, c in statsRow:GetChildren() do if c:IsA("GuiObject") then c:Destroy() end end
+		for i, stat in stats or {} do
+			local cell = New("Frame", { BackgroundTransparency = 1, Size = UDim2.new(0, 0, 0, 30), AutomaticSize = Enum.AutomaticSize.X, LayoutOrder = i, Parent = statsRow })
+			Util.List(cell, 0, Enum.FillDirection.Vertical)
+			local value = New("TextLabel", { Weight = "SemiBold", TextSize = 14, Size = UDim2.new(0, 0, 0, 17), AutomaticSize = Enum.AutomaticSize.X, LayoutOrder = 1, Parent = cell })
+			Theme.Bind(value, { TextColor3 = "Text" })
+			Util.SetText(value, tostring(stat.Value or stat[2] or ""))
+			local label = New("TextLabel", { TextSize = 11, Size = UDim2.new(0, 0, 0, 13), AutomaticSize = Enum.AutomaticSize.X, LayoutOrder = 2, Parent = cell })
+			Theme.Bind(label, { TextColor3 = "Muted" })
+			Util.SetText(label, tostring(stat.Label or stat[1] or ""))
+		end
+		statsRow.Visible = stats ~= nil and #stats > 0
+	end
+	function obj:SetSubtitle(text)
+		Util.SetText(subLabel, text or "")
+		subLabel.Visible = text ~= nil and text ~= ""
+	end
+	function obj:SetNickname(text)
+		obj.Nickname = text
+		Util.SetText(nameLabel, text or obj.Username or "")
+	end
+
+	local token = 0
+	--- Point the card at another account (by username or user id)
+	function obj:SetUser(userOrId)
+		if type(userOrId) == "number" then obj.UserId, obj.Username = userOrId, nil else obj.Username, obj.UserId = userOrId, nil end
+		token += 1
+		local mine = token
+		Util.SetText(nameLabel, opts.Nickname or obj.Username or "Loading…")
+		Util.SetText(handle, obj.Username and ("@" .. obj.Username) or "")
+		task.spawn(function()
+			local id, display, name = lookupUser(obj.Username, obj.UserId)
+			if mine ~= token or not card.Parent then return end
+			obj.UserId = id or obj.UserId
+			obj.Username = name or obj.Username
+			obj.DisplayName = display
+			Util.SetText(nameLabel, opts.Nickname or display or name or "Unknown")
+			Util.SetText(handle, obj.Username and ("@" .. obj.Username) or "")
+			if id and obj._showAvatar and not opts.Image then obj._showAvatar(thumbUrl(id, avatarKind)) end
+			if opts.OnLoaded then Util.Fire(opts.OnLoaded, obj) end
+		end)
+	end
+
+	obj:SetTags(opts.Tags or (opts.Owner and { "Owner" } or nil))
+	obj:SetStats(opts.Stats)
+	obj:SetSubtitle(opts.Subtitle)
+	obj:SetUser(opts.UserId or opts.Username)
+
+	row.Frame.Activated:Connect(function()
+		Elements.Click(row, "Accent")
+		if opts.Callback then Util.Fire(opts.Callback, obj) end
+		if opts.Copy ~= false and obj.Username then
+			if Util.Copy(obj.Username) then
+				Vesper:Notify({ Title = "Copied", Content = "@" .. obj.Username, Type = "Success", Duration = 2.5 })
+			end
+		end
+	end)
+	return Elements.Finish(obj, container, row, "element", copy)
+end
+
+-- ─────────────────────────────────────────────────────────────
+--  Scanner: press Scan, a light sweeps the bar, steps tick by, results slide in
+--  Run = function(scan)   scan.Step("text", 0-1)  scan.Result("Label", "value", "Success"|"Warning"|"Danger"|"Info", "icon")
+--                         scan.Progress(0-1)  scan.Done("text")  scan.Fail("text")  scan.Cancelled()
+--  Without Run, the Steps are played over Duration seconds. Callback(results) runs when it is done.
+-- ─────────────────────────────────────────────────────────────
+Elements.Create.Scanner = function(container, opts)
+	local row = Elements.Row(container, opts, 104, 34, false)
+	local obj = { Type = "Scanner", Running = false, Results = {}, Progress = 0 }
+	local runToken = 0
+
+	local button = Util.MakeButton({ Parent = row.Right, Text = opts.ButtonText or "Scan", Icon = opts.ButtonIcon or "scan-line", Variant = "Primary", Height = 34, Width = 104, Radius = 10 })
+	button.AnchorPoint, button.Position = Vector2.new(1, 0.5), UDim2.fromScale(1, 0.5)
+	local btnLabel, btnIcon = Util.Part(button, "Label"), Util.Part(button, "Icon")
+
+	-- panel under the description (collapsed until something happens)
+	local panel = New("Frame", { Name = "ScanPanel", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, LayoutOrder = 5, Visible = false, Parent = row.Left })
+	Util.List(panel, 8)
+	New("Frame", { Size = UDim2.new(1, 0, 0, 2), BackgroundTransparency = 1, LayoutOrder = 0, Parent = panel })
+	local barRow = New("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 14), LayoutOrder = 1, Parent = panel })
+	local track = New("Frame", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.fromScale(0, 0.5), Size = UDim2.new(1, -44, 0, 8), BackgroundColor3 = WHITE, ClipsDescendants = true, Parent = barRow })
+	Theme.Bind(track, { BackgroundColor3 = "Input" })
+	Util.Corner(track, 4)
+	Util.Shade(track, 90, 0.1)
+	local fill = New("Frame", { Size = UDim2.fromScale(0, 1), BackgroundColor3 = WHITE, Parent = track })
+	Util.Corner(fill, 4)
+	Theme.AccentGradient(fill, 0)
+	-- the scan light: a soft bar that travels across the whole track while scanning
+	local beam = New("Frame", { Size = UDim2.fromScale(0.28, 1), Position = UDim2.fromScale(-0.4, 0), BackgroundColor3 = WHITE, BackgroundTransparency = 0.35, Visible = false, ZIndex = 3, Parent = track })
+	New("UIGradient", { Transparency = NumberSequence.new({ kp(0, 1), kp(0.5, 0), kp(1, 1) }), Parent = beam })
+	local beamTween
+	local percent = New("TextLabel", { Weight = "SemiBold", TextSize = 12, AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.fromScale(1, 0.5), Size = UDim2.fromOffset(38, 16), TextXAlignment = Enum.TextXAlignment.Right, Text = "0%", Parent = barRow })
+	Theme.Bind(percent, { TextColor3 = "Text" })
+	local status = New("TextLabel", { Weight = "Medium", TextSize = 12, Size = UDim2.new(1, 0, 0, 16), LayoutOrder = 2, Text = "", Parent = panel })
+	Theme.Bind(status, { TextColor3 = "SubText" })
+	local list = New("Frame", { Name = "Results", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, LayoutOrder = 3, Parent = panel })
+	Util.List(list, 5)
+
+	local smooth = Util.Smoother(0, 10, function(v)
+		if not fill.Parent then return end
+		fill.Size = UDim2.fromScale(Util.Clamp(v, 0, 1), 1)
+		percent.Text = string.format("%d%%", math.floor(v * 100 + 0.5))
+	end)
+
+	local function setStatus(text, tone)
+		Theme.Bind(status, { TextColor3 = tone and toneToken(tone) or "SubText" })
+		Util.SetText(status, text or "")
+		status.TextTransparency = 1
+		Util.Tween(status, 0.2, { TextTransparency = 0 }, "Quad")
+	end
+	local function setButton(text, icon)
+		if btnLabel then btnLabel.Text = text end
+		if btnIcon and icon then Icons.Apply(btnIcon, icon, 14, "AccentText") end
+	end
+	local function addResult(label, value, tone, icon)
+		local item = New("Frame", { Size = UDim2.new(1, 0, 0, 26), BackgroundColor3 = WHITE, BackgroundTransparency = 1, Parent = list, LayoutOrder = #obj.Results + 1 })
+		Util.Corner(item, 8)
+		Theme.Bind(item, { BackgroundColor3 = "Input" })
+		local mark = New("Frame", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 8, 0.5, 0), Size = UDim2.fromOffset(3, 12), BackgroundColor3 = WHITE, BackgroundTransparency = 1, Parent = item })
+		Theme.Bind(mark, { BackgroundColor3 = toneToken(tone or "Accent") })
+		Util.Corner(mark, 2)
+		local ic = Util.Icon(item, icon or "check", 13, toneToken(tone or "Accent"), { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 18, 0.5, 0), ImageTransparency = 1 })
+		local name = New("TextLabel", { Weight = "Medium", TextSize = 12, Position = UDim2.fromOffset(38, 0), Size = UDim2.new(1, -110, 1, 0), TextTransparency = 1, Parent = item })
+		Theme.Bind(name, { TextColor3 = "Text" })
+		Util.SetText(name, tostring(label))
+		local val = New("TextLabel", { Weight = "SemiBold", TextSize = 12, AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -10, 0, 0), Size = UDim2.new(0, 80, 1, 0), TextXAlignment = Enum.TextXAlignment.Right, TextTransparency = 1, Parent = item })
+		Theme.Bind(val, { TextColor3 = toneToken(tone or "Accent") })
+		Util.SetText(val, tostring(value or ""))
+		-- slides in from the left, fading up
+		item.Position = UDim2.fromOffset(-14, 0)
+		Util.Tween(item, 0.4, { Position = UDim2.fromOffset(0, 0), BackgroundTransparency = 0.45 }, "Out")
+		Util.Tween(mark, 0.4, { BackgroundTransparency = 0 }, "Quad")
+		Util.Tween(ic, 0.4, { ImageTransparency = 0 }, "Quad")
+		Util.Tween(name, 0.4, { TextTransparency = 0 }, "Quad")
+		Util.Tween(val, 0.4, { TextTransparency = 0 }, "Quad")
+		table.insert(obj.Results, { Label = label, Value = value, Tone = tone, Item = item })
+	end
+
+	function obj:Clear()
+		for _, c in list:GetChildren() do if c:IsA("GuiObject") then c:Destroy() end end
+		table.clear(obj.Results)
+	end
+	function obj:SetProgress(p, instant)
+		obj.Progress = Util.Clamp(p, 0, 1)
+		smooth.Set(obj.Progress, instant)
+	end
+	local function stopBeam()
+		if beamTween then beamTween:Cancel(); beamTween = nil end
+		beam.Visible = false
+	end
+	local function finish(mine, text, tone, ok)
+		if mine ~= runToken then return end
+		obj.Running = false
+		stopBeam()
+		if ok then obj:SetProgress(1) end
+		setStatus(text or (ok and "Scan complete" or "Scan failed"), ok and "Success" or "Danger")
+		setButton(ok and (opts.AgainText or "Scan again") or "Retry", ok and "rotate-cw" or "rotate-ccw")
+		Sound.Play(ok and "Success" or "Error")
+		if ok then
+			Fx.Flash(row.Frame, { Color = "Success", Alpha = 0.92, Duration = 0.8, Radius = UDim.new(0, 12) })
+		else
+			Fx.Flash(row.Frame, { Color = "Danger", Alpha = 0.9, Duration = 0.6, Radius = UDim.new(0, 12) })
+		end
+		if opts.Callback then
+			local plain = {}
+			for _, r in obj.Results do table.insert(plain, { Label = r.Label, Value = r.Value, Tone = r.Tone }) end
+			Util.Fire(opts.Callback, plain, ok)
+		end
+	end
+
+	function obj:Stop()
+		if not obj.Running then return end
+		runToken += 1
+		obj.Running = false
+		stopBeam()
+		setStatus("Stopped", "Warning")
+		setButton("Scan", "scan-line")
+	end
+
+	function obj:Start()
+		if obj.Running then return end
+		runToken += 1
+		local mine = runToken
+		obj.Running = true
+		obj:Clear()
+		obj:SetProgress(0, true)
+		panel.Visible = true
+		beam.Visible = true
+		beam.Position = UDim2.fromScale(-0.4, 0)
+		beamTween = Util.Loop(beam, 1.05, { Position = UDim2.fromScale(1.1, 0) }, "Sine", false)
+		setButton("Scanning…", "loader-circle")
+		setStatus(opts.StartText or "Starting scan…")
+		Sound.Play("Open")
+		local scan = { Cancelled = function() return mine ~= runToken end }
+		function scan.Step(text, p)
+			if mine ~= runToken then return end
+			setStatus(text)
+			if p then obj:SetProgress(p) end
+		end
+		function scan.Progress(p) if mine == runToken then obj:SetProgress(p) end end
+		function scan.Result(label, value, tone, icon)
+			if mine ~= runToken then return end
+			addResult(label, value, tone or "Accent", icon)
+			Sound.Play("Tick")
+		end
+		function scan.Done(text) finish(mine, text, "Success", true) end
+		function scan.Fail(text) finish(mine, text, "Danger", false) end
+
+		task.spawn(function()
+			if opts.Run then
+				local ok, returned = pcall(opts.Run, scan)
+				if mine ~= runToken then return end
+				if not ok then finish(mine, "Scan failed", "Danger", false); return end
+				if type(returned) == "table" then
+					for _, r in returned do scan.Result(r.Label or r[1], r.Value or r[2], r.Tone or r[3], r.Icon or r[4]); task.wait(0.12) end
+				end
+				if obj.Running and mine == runToken then scan.Done() end
+			else
+				local steps = opts.Steps or { "Reading data", "Checking modules", "Finishing up" }
+				local total = opts.Duration or 2.6
+				for i, text in steps do
+					if mine ~= runToken then return end
+					scan.Step(type(text) == "table" and text.Text or text, (i - 1) / #steps + 0.05)
+					task.wait(total / #steps)
+				end
+				for _, r in opts.Results or {} do
+					if mine ~= runToken then return end
+					scan.Result(r.Label or r[1], r.Value or r[2], r.Tone or r[3], r.Icon or r[4])
+					task.wait(0.15)
+				end
+				scan.Done()
+			end
+		end)
+	end
+
+	button.Activated:Connect(function()
+		if obj.Locked then return end
+		if obj.Running then obj:Stop() else obj:Start() end
+	end)
+	obj.Destroyed = false
+	row.Detach = function() runToken += 1; smooth.Destroy() end
+	return Elements.Finish(obj, container, row, "element", opts)
+end
+
+-- ─────────────────────────────────────────────────────────────
+--  Graph: live bars that glide as new samples arrive
+--  opts: Title, Desc, Icon, Get = function() -> number, Interval = 0.5, Points = 32, Height = 74, Min = 0, Max (nil = automatic),
+--        Format = "%d", Unit = "ms", Color = "Accent" | Color3, Default = {numbers}
+-- ─────────────────────────────────────────────────────────────
+Elements.Create.Graph = function(container, opts)
+	local row = Elements.Row(container, opts, 86, 24, false)
+	local N = Util.Clamp(opts.Points or 32, 8, 80)
+	local H = opts.Height or 74
+	local fixedMax = opts.Max
+	local minV = opts.Min or 0
+	local obj = { Type = "Graph", Values = {}, Value = 0 }
+	for _ = 1, N do table.insert(obj.Values, minV) end
+
+	local readout = New("TextLabel", { Weight = "SemiBold", TextSize = 18, Size = UDim2.fromScale(1, 1), TextXAlignment = Enum.TextXAlignment.Right, Text = "–", Parent = row.Right })
+	Theme.Bind(readout, { TextColor3 = "Text" })
+
+	New("Frame", { Size = UDim2.new(1, 0, 0, 4), BackgroundTransparency = 1, LayoutOrder = 3, Parent = row.Left })
+	local chart = New("Frame", { Name = "Chart", Size = UDim2.new(1, 0, 0, H), BackgroundColor3 = WHITE, ClipsDescendants = true, LayoutOrder = 4, Parent = row.Left })
+	Theme.Bind(chart, { BackgroundColor3 = "Input" })
+	Util.Corner(chart, 10)
+	Util.Shade(chart, 90, 0.1)
+	Edge.Attach(chart, "Input", { Radius = 10, Alpha = 0.45, Contact = false, ZIndex = 6 })
+	for i = 1, 3 do
+		local line = Util.FadeLine(chart, { Position = UDim2.new(0, 0, i / 4, 0), Size = UDim2.new(1, 0, 0, 1), Strength = 0.18, ZIndex = 2 })
+		line.AnchorPoint = Vector2.new(0, 0.5)
+	end
+	local plot = New("Frame", { BackgroundTransparency = 1, Position = UDim2.fromOffset(8, 8), Size = UDim2.new(1, -16, 1, -16), Parent = chart })
+	local bars = {}
+	local gap = 2
+	for i = 1, N do
+		local bar = New("Frame", {
+			AnchorPoint = Vector2.new(0, 1), Position = UDim2.new((i - 1) / N, 0, 1, 0), Size = UDim2.new(1 / N, -gap, 0, 2),
+			BackgroundColor3 = WHITE, BackgroundTransparency = 0.45, ZIndex = 3, Parent = plot,
+		})
+		Util.Corner(bar, 3)
+		if typeof(opts.Color) == "Color3" then bar.BackgroundColor3 = opts.Color else Theme.AccentGradient(bar, 90) end
+		bars[i] = bar
+	end
+
+	local shownMax = fixedMax or 1
+	local function render()
+		local top = fixedMax
+		if not top then
+			top = minV + 1
+			for _, v in obj.Values do if v > top then top = v end end
+			top *= 1.15
+		end
+		shownMax = top
+		for i, v in obj.Values do
+			local ratio = Util.Clamp((v - minV) / math.max(top - minV, 1e-6), 0, 1)
+			local last = i == N
+			Util.Tween(bars[i], 0.32, {
+				Size = UDim2.new(1 / N, -gap, math.max(ratio, 0.03), 0),
+				BackgroundTransparency = last and 0 or (0.3 + 0.35 * (1 - i / N)),
+			}, "Out")
+		end
+	end
+
+	local counter = Util.Smoother(0, 9, function(v)
+		readout.Text = string.format(opts.Format or "%d", v) .. (opts.Unit and (" " .. opts.Unit) or "")
+	end)
+	function obj:Push(value)
+		value = tonumber(value) or minV
+		obj.Value = value
+		table.remove(obj.Values, 1)
+		table.insert(obj.Values, value)
+		counter.Set(value)
+		render()
+	end
+	function obj:SetValues(values)
+		for i = 1, N do obj.Values[i] = tonumber(values[#values - N + i]) or minV end
+		obj.Value = obj.Values[N]
+		counter.Set(obj.Value)
+		render()
+	end
+	function obj:Clear()
+		for i = 1, N do obj.Values[i] = minV end
+		obj.Value = minV
+		counter.Set(minV)
+		render()
+	end
+	if type(opts.Default) == "table" then obj:SetValues(opts.Default) else render() end
+
+	-- live feed
+	local alive = true
+	row.Detach = function() alive = false; counter.Destroy() end
+	if opts.Get then
+		task.spawn(function()
+			local interval = opts.Interval or 0.5
+			while alive and row.Frame.Parent do
+				local window = container.Window
+				if not window or (window.Visible and not window.Minimized) then
+					local ok, value = pcall(opts.Get, window)
+					if ok and type(value) == "number" then obj:Push(value) end
+				end
+				task.wait(interval)
+			end
+		end)
+	end
+	return Elements.Finish(obj, container, row, "element", opts)
+end
+
+-- ─────────────────────────────────────────────────────────────
+--  Custom: an empty card you fill yourself
+--  Section:Custom({ Title, Desc, Height = 120, Build = function(frame, api) ... end })
+--  `frame` is a transparent Frame; `api` has New, Util, Theme, Fx, Edge, Icons, Elements and the owning Window.
+-- ─────────────────────────────────────────────────────────────
+local function uiApi(window)
+	return { New = New, Util = Util, Theme = Theme, Fx = Fx, Edge = Edge, Icons = Icons, Elements = Elements, Sound = Sound, Shadow = Shadow, Window = window, Vesper = Vesper }
+end
+
+Elements.Create.Custom = function(container, opts)
+	local row = Elements.Row(container, opts, 0, 0, false)
+	if (opts.Title == nil or opts.Title == "") then row.TitleLabel.Visible = false end
+	local obj = { Type = "Custom" }
+	local frame = New("Frame", {
+		Name = "CustomContent", BackgroundTransparency = 1, LayoutOrder = 4, Parent = row.Left,
+		Size = UDim2.new(1, 0, 0, opts.Height or 0), AutomaticSize = opts.Height and Enum.AutomaticSize.None or Enum.AutomaticSize.Y,
+	})
+	if opts.Title and opts.Title ~= "" then New("Frame", { Size = UDim2.new(1, 0, 0, 4), BackgroundTransparency = 1, LayoutOrder = 3, Parent = row.Left }) end
+	obj.Content = frame
+	if opts.Build then
+		local ok, err = pcall(opts.Build, frame, uiApi(container.Window), obj)
+		if not ok then warn("[Vesper] Custom element failed: " .. tostring(err)) end
+	end
+	return Elements.Finish(obj, container, row, "element", opts)
+end
+
+--- The building blocks the library uses itself, for your own elements, key systems or loaders
+function Vesper:GetAPI() return uiApi(nil) end
+
+-- ─────────────────────────────────────────────────────────────
+--  HUD: a floating strip with live values (FPS, ping, time, ...) that you can move around
+--
+--  local hud = Vesper:CreateHUD({ Title = "Vesper", Icon = "sparkles", Position = "TopLeft", Items = { "FPS", "Ping", "Time" } })
+--  hud:AddItem({ Label = "Coins", Icon = "coins", Get = function() return 120 end })        hud:SetVisible(false)
+--  Item = "FPS" | "Ping" | "Players" | "Time" | "Memory" | { Label, Icon, Get = function() -> text|number, Interval, Tone = function(v) -> "Success" }, Format }
+-- ─────────────────────────────────────────────────────────────
+local HUD_ANCHORS = {
+	TopLeft = { 0, 0 }, TopCenter = { 0.5, 0 }, TopRight = { 1, 0 },
+	BottomLeft = { 0, 1 }, BottomCenter = { 0.5, 1 }, BottomRight = { 1, 1 },
+}
+
+local function memoryMB()
+	local ok, v = pcall(function() return game:GetService("Stats"):GetTotalMemoryUsageMb() end)
+	return ok and v or 0
+end
+
+local HUD_PRESETS = {
+	FPS = { Label = "FPS", Icon = "activity", Get = function(h) return h.Fps end, Format = "%d",
+		Tone = function(v) return v >= 55 and "Success" or (v >= 30 and "Warning" or "Danger") end },
+	Ping = { Label = "Ping", Icon = "wifi", Get = function() return getPing() end, Format = "%d ms",
+		Tone = function(v) return v <= 90 and "Success" or (v <= 180 and "Warning" or "Danger") end },
+	Players = { Label = "Players", Icon = "users", Get = function() return #Players:GetPlayers() end, Format = "%d" },
+	Memory = { Label = "Memory", Icon = "memory-stick", Get = memoryMB, Format = "%d MB", Interval = 2 },
+	Time = { Label = "Time", Icon = "clock", Interval = 1, Get = function() return os.date("%H:%M:%S") end },
+}
+
+function Vesper:CreateHUD(opts)
+	if type(opts) ~= "table" then opts = {} end
+	Layer.Init()
+	local hud = { Items = {}, Visible = opts.Visible ~= false, Fps = 60 }
+	local host = Host.new(opts.DisplayOrder or 900)
+	screenScale(host, opts.Scale)
+	table.insert(Vesper._Screens, host)
+	hud.Host = host
+	local margin = opts.Margin or 14
+	local anchorName = HUD_ANCHORS[opts.Position] and opts.Position or "TopLeft"
+	local vertical = opts.Layout == "Vertical"
+
+	local anchor = HUD_ANCHORS[anchorName]
+	local holder, card = Util.Surface(host.Root, {
+		Name = "HUD", AnchorPoint = Vector2.new(anchor[1], anchor[2]),
+		Position = UDim2.new(anchor[1], anchor[1] == 0 and margin or (anchor[1] == 1 and -margin or 0), anchor[2], anchor[2] == 0 and margin or -margin),
+		Size = UDim2.new(0, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.XY, ZIndex = 5,
+	}, 14, true)
+	card.AutomaticSize = Enum.AutomaticSize.XY
+	card.Size = UDim2.new(0, 0, 0, 0)
+	Theme.Bind(card, { BackgroundColor3 = "Popup" })
+	Util.Shade(card, 90, 0.08)
+	local scale = New("UIScale", { Scale = 0.9, Parent = holder })
+	hud.Holder, hud.Card = holder, card
+
+	local content = New("Frame", { Name = "Content", BackgroundTransparency = 1, Size = UDim2.new(0, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.XY, Parent = card })
+	Util.Padding(content, vertical and 12 or 8, vertical and 14 or 14, vertical and 12 or 8, vertical and 14 or 10)
+	Util.List(content, vertical and 8 or 14, vertical and Enum.FillDirection.Vertical or Enum.FillDirection.Horizontal, Enum.HorizontalAlignment.Left, Enum.VerticalAlignment.Center)
+
+	-- title block
+	local head = New("Frame", { BackgroundTransparency = 1, Size = UDim2.new(0, 0, 0, 30), AutomaticSize = Enum.AutomaticSize.X, LayoutOrder = 0, Parent = content })
+	Util.List(head, 8, Enum.FillDirection.Horizontal, Enum.HorizontalAlignment.Left, Enum.VerticalAlignment.Center)
+	local logo
+	if opts.Icon ~= false then
+		logo = makeLogo(head, opts.Icon or "sparkles", 26, 8)
+		logo.LayoutOrder = 1
+	end
+	local titleLabel = New("TextLabel", { Weight = "SemiBold", TextSize = 13, Size = UDim2.new(0, 0, 1, 0), AutomaticSize = Enum.AutomaticSize.X, LayoutOrder = 2, Parent = head })
+	Theme.Bind(titleLabel, { TextColor3 = "Text" })
+	Util.SetText(titleLabel, opts.Title or "Vesper")
+	if opts.Title == false then head.Visible = false end
+
+	local nextOrder = 1
+	function hud:AddItem(def)
+		if type(def) == "string" then
+			local preset = HUD_PRESETS[def]
+			if not preset then return end
+			def = table.clone(preset)
+		end
+		nextOrder += 1
+		local item = { Def = def, Acc = 999 }
+		item.Frame = New("Frame", { Name = def.Label or "Item", BackgroundTransparency = 1, Size = UDim2.new(0, 0, 0, 30), AutomaticSize = Enum.AutomaticSize.X, LayoutOrder = nextOrder, Parent = content })
+		Util.List(item.Frame, 7, Enum.FillDirection.Horizontal, Enum.HorizontalAlignment.Left, Enum.VerticalAlignment.Center)
+		-- a thin divider before every item
+		local bar = New("Frame", { Size = UDim2.fromOffset(2, 18), BackgroundColor3 = WHITE, BackgroundTransparency = 0.6, LayoutOrder = 0, Parent = item.Frame })
+		Theme.Bind(bar, { BackgroundColor3 = "Stroke" })
+		Util.Corner(bar, 1)
+		item.Icon = def.Icon and Util.Icon(item.Frame, def.Icon, 15, "SubText", { LayoutOrder = 1 }) or nil
+		local col = New("Frame", { BackgroundTransparency = 1, Size = UDim2.new(0, 0, 1, 0), AutomaticSize = Enum.AutomaticSize.X, LayoutOrder = 2, Parent = item.Frame })
+		Util.List(col, 0, Enum.FillDirection.Vertical, Enum.HorizontalAlignment.Left, Enum.VerticalAlignment.Center)
+		item.Value = New("TextLabel", { Weight = "SemiBold", TextSize = 14, Size = UDim2.new(0, 0, 0, 16), AutomaticSize = Enum.AutomaticSize.X, TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = 1, Text = "–", Parent = col })
+		Theme.Bind(item.Value, { TextColor3 = "Text" })
+		item.Label = New("TextLabel", { TextSize = 10.5, Size = UDim2.new(0, 0, 0, 12), AutomaticSize = Enum.AutomaticSize.X, TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = 2, Parent = col })
+		Theme.Bind(item.Label, { TextColor3 = "Muted" })
+		Util.SetText(item.Label, def.Label or "")
+		item.Label.Visible = def.Label ~= nil and def.Label ~= "" and opts.Labels ~= false
+		item.Smooth = type(def.Get) == "function" and Util.Smoother(0, 12, function(v)
+			if item.Numeric then item.Value.Text = string.format(def.Format or "%d", v) end
+		end) or nil
+		table.insert(hud.Items, item)
+		function item:Remove()
+			local idx = table.find(hud.Items, item)
+			if idx then table.remove(hud.Items, idx) end
+			if item.Smooth then item.Smooth.Destroy() end
+			item.Frame:Destroy()
+		end
+		return item
+	end
+	function hud:RemoveItem(label)
+		for i = #hud.Items, 1, -1 do
+			if hud.Items[i].Def.Label == label then hud.Items[i]:Remove() end
+		end
+	end
+
+	for _, def in opts.Items or { "FPS", "Ping", "Time" } do hud:AddItem(def) end
+
+	function hud:SetTitle(text) Util.SetText(titleLabel, text) end
+	function hud:SetVisible(visible)
+		hud.Visible = visible == true
+		if hud.Visible then
+			holder.Visible = true
+			Util.FadeCanvas(card, 0, 0.3, "Out")
+			Util.Tween(scale, 0.4, { Scale = 1 }, "Back")
+		else
+			Util.FadeCanvas(card, 1, 0.2, "Quad")
+			Util.Tween(scale, 0.25, { Scale = 0.94 }, "Quad")
+			task.delay(0.24, function() if not hud.Visible then holder.Visible = false end end)
+		end
+	end
+	function hud:Toggle() hud:SetVisible(not hud.Visible) end
+	function hud:SetPosition(name)
+		local a = HUD_ANCHORS[name]
+		if not a then return end
+		holder.AnchorPoint = Vector2.new(a[1], a[2])
+		Util.Tween(holder, 0.45, { Position = UDim2.new(a[1], a[1] == 0 and margin or (a[1] == 1 and -margin or 0), a[2], a[2] == 0 and margin or -margin) }, "Out")
+	end
+	function hud:Destroy()
+		local idx = table.find(Vesper._Screens, host)
+		if idx then table.remove(Vesper._Screens, idx) end
+		for _, item in hud.Items do if item.Smooth then item.Smooth.Destroy() end end
+		if hud._conn then hud._conn:Disconnect() end
+		if hud._key then hud._key:Disconnect() end
+		host:Destroy()
+	end
+
+	-- drag the strip anywhere (hold it and move)
+	if opts.Draggable ~= false then
+		local grab = New("TextButton", { Name = "Grab", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 20, Parent = card })
+		local startPos, startMouse
+		Util.Drag(grab, function(pos)
+			if not startMouse then return end
+			local delta = (Vector2.new(pos.X, pos.Y) - startMouse) / host:GetScale()
+			holder.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+		end, function(input)
+			startMouse = Vector2.new(input.Position.X, input.Position.Y)
+			startPos = holder.Position
+			Util.Tween(scale, 0.12, { Scale = 1.03 }, "Quad")
+		end, function()
+			startMouse = nil
+			Util.Tween(scale, 0.25, { Scale = 1 }, "Back")
+		end)
+	end
+
+	-- values are refreshed by one loop
+	local frames, fpsAcc = 0, 0
+	hud._conn = RunService.Heartbeat:Connect(function(dt)
+		frames += 1
+		fpsAcc += dt
+		if fpsAcc >= 0.5 then hud.Fps = frames / fpsAcc; frames, fpsAcc = 0, 0 end
+		if not hud.Visible then return end
+		for _, item in hud.Items do
+			item.Acc += dt
+			if item.Acc >= (item.Def.Interval or 0.5) then
+				item.Acc = 0
+				local ok, value = pcall(item.Def.Get, hud)
+				if ok then
+					if type(value) == "number" then
+						item.Numeric = true
+						item.Smooth.Set(value)
+						if item.Def.Tone and item.Icon then
+							local tone = item.Def.Tone(value)
+							Util.Tween(item.Icon, 0.3, { ImageColor3 = toneColor(tone) }, "Quad")
+						end
+					else
+						item.Numeric = false
+						item.Value.Text = tostring(value)
+					end
+				end
+			end
+		end
+	end)
+
+	if opts.ToggleKey then
+		local key = Util.ParseKeyCode(opts.ToggleKey)
+		if key then
+			hud._key = UserInputService.InputBegan:Connect(function(input, processed)
+				if not processed and input.KeyCode == key then hud:Toggle() end
+			end)
+		end
+	end
+
+	-- entrance: slides in from the nearest edge
+	holder.Visible = hud.Visible
+	if hud.Visible then
+		local from = anchor[2] == 0 and -14 or 14
+		local basePos = holder.Position
+		holder.Position = UDim2.new(basePos.X.Scale, basePos.X.Offset, basePos.Y.Scale, basePos.Y.Offset + from)
+		Util.FadeCanvas(card, 0, 0.4, "Out")
+		Util.Tween(scale, 0.5, { Scale = 1 }, "Back")
+		Util.Tween(holder, 0.5, { Position = basePos }, "Out")
+	end
+	return hud
+end
 -- ─────────────────────────────────────────────────────────────
 --  Public API
 -- ─────────────────────────────────────────────────────────────
@@ -6976,6 +9284,28 @@ function Vesper:GetThemes() return table.clone(Theme.Order) end
 --- Vesper:AddTheme("Name", { Base = Color3, Accent = Color3, Accent2 = Color3?, Mode = "Dark"|"Light"?, Style = "Orbs"?, Override = {...}? })
 function Vesper:AddTheme(name, spec) return Theme.Add(name, spec) end
 function Vesper:OnThemeChanged(fn) table.insert(Theme.Listeners, fn) end
+
+--- Dark / Light is independent from the theme: every theme (colour) has both.
+--- Vesper:SetMode("Light")  Vesper:GetMode()  Vesper:ToggleMode()
+function Vesper:SetMode(mode) return Theme.SetMode(mode) end
+function Vesper:GetMode() return Theme.Mode end
+function Vesper:ToggleMode()
+	Theme.SetMode(Theme.Mode == "Dark" and "Light" or "Dark")
+	return Theme.Mode
+end
+
+-- Edges (strokes + contact shadows) ────────────────────────
+--- Vesper:SetEdge({ Mode = "Auto"|"Stroke"|"Shadow"|"Both"|"None", Style = "Corners"|"Diagonal"|"Top"|"Full", Thickness = 0.5-4, Strength = 0-1 (0.5 = as designed) })
+--- Strokes follow the rounded corners and fade out before they meet. Auto lets every part pick what suits it
+--- (buttons and chips use strokes, windows and cards use both). Any element can override it with `Edge = "Stroke"` / "Shadow" / "Both" / "None".
+function Vesper:SetEdge(cfg)
+	if type(cfg) == "string" then cfg = { Mode = cfg } end
+	if type(cfg) ~= "table" then return end
+	Edge.Set(cfg)
+end
+function Vesper:GetEdge()
+	return { Mode = Edge.Mode, Style = Edge.Style, Thickness = Edge.Thickness, Strength = Edge.Strength }
+end
 
 -- Backgrounds ──────────────────────────────────────────────
 --- Vesper:SetBackground("Orbs") — Plain | Orbs | Streaks | Aurora | Stars | Grid | Shards | Rings, or "Default" to follow the theme
@@ -7087,6 +9417,8 @@ function Vesper:Destroy()
 	end
 	table.clear(Vesper.Windows)
 	table.clear(Vesper.Flags)
+	for _, screen in Vesper._Screens or {} do pcall(function() screen:Destroy() end) end
+	if Vesper._Screens then table.clear(Vesper._Screens) end
 	-- the notification layer is rebuilt on demand, so it must not keep pointing at destroyed objects
 	if Layer.Host then pcall(function() Layer.Host:Destroy() end) end
 	Layer.Host, Layer.NotifyHolder, Layer.NotifyList = nil, nil, nil
