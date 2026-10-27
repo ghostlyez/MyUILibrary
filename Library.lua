@@ -2,7 +2,7 @@
 --!nolint
 --[[
     ╔═══════════════════════════════════════════════════════════════╗
-    ║  Vesper UI Library                                  v1.00.0   ║
+    ║  Vesper UI Library                                  v1.10.0   ║
     ║  Single-file Roblox UI library · 1500+ built-in Lucide icons  ║
     ║  Made by wheizx · Discord: wheizx (loader)                    ║
     ║  Docs: see README_VESPER.md                                   ║
@@ -40,7 +40,7 @@ end
 -- ─────────────────────────────────────────────────────────────
 --  Namespaces (kept as tables to stay far below the local limit)
 -- ─────────────────────────────────────────────────────────────
-local Vesper   = { Version = "1.00.0", Author = "wheizx", Windows = {}, Flags = {}, Debug = false }
+local Vesper   = { Version = "1.10.0", Author = "wheizx", Windows = {}, Flags = {}, Debug = false }
 local Util     = {}
 local Theme    = {}
 local Icons    = {}
@@ -114,7 +114,7 @@ local DEFAULTS = {
 	TextBox     = { BorderSizePixel = 0, BackgroundTransparency = 1, TextColor3 = WHITE, TextSize = 14, ClearTextOnFocus = false, TextXAlignment = Enum.TextXAlignment.Left },
 	ImageLabel  = { BorderSizePixel = 0, BackgroundTransparency = 1 },
 	ImageButton = { BorderSizePixel = 0, BackgroundTransparency = 1, AutoButtonColor = false },
-	ScrollingFrame = { BorderSizePixel = 0, BackgroundTransparency = 1, ScrollBarThickness = 0, CanvasSize = UDim2.new(), ScrollBarImageTransparency = 1 },
+	ScrollingFrame = { BorderSizePixel = 0, BackgroundTransparency = 1, ScrollBarThickness = 0, CanvasSize = UDim2.new(), ScrollBarImageTransparency = 1, ElasticBehavior = Enum.ElasticBehavior.Never },
 	UIStroke    = { ApplyStrokeMode = Enum.ApplyStrokeMode.Border },
 }
 
@@ -171,18 +171,21 @@ end
 -- ─────────────────────────────────────────────────────────────
 --  Tweening
 -- ─────────────────────────────────────────────────────────────
+-- v1.10: no overshoot styles anywhere. The legacy names (Back / Elastic / Bounce) are still accepted
+-- so old scripts keep working, but they resolve to calm, professional curves.
 local EASE = {
 	Out     = { Enum.EasingStyle.Quint,       Enum.EasingDirection.Out },
 	Quad    = { Enum.EasingStyle.Quad,        Enum.EasingDirection.Out },
 	In      = { Enum.EasingStyle.Quint,       Enum.EasingDirection.In },
-	Back    = { Enum.EasingStyle.Back,        Enum.EasingDirection.Out },
 	Sine    = { Enum.EasingStyle.Sine,        Enum.EasingDirection.InOut },
 	Linear  = { Enum.EasingStyle.Linear,      Enum.EasingDirection.InOut },
-	Elastic = { Enum.EasingStyle.Elastic,     Enum.EasingDirection.Out },
 	InOut   = { Enum.EasingStyle.Quint,       Enum.EasingDirection.InOut },
 	Expo    = { Enum.EasingStyle.Exponential, Enum.EasingDirection.Out },
-	Bounce  = { Enum.EasingStyle.Bounce,      Enum.EasingDirection.Out },
+	Cubic   = { Enum.EasingStyle.Cubic,       Enum.EasingDirection.Out },
+	CubicIn = { Enum.EasingStyle.Cubic,       Enum.EasingDirection.In },
+	CubicIO = { Enum.EasingStyle.Cubic,       Enum.EasingDirection.InOut },
 }
+EASE.Back, EASE.Elastic, EASE.Bounce = EASE.Cubic, EASE.Expo, EASE.Quad
 local infoCache = {}
 function Util.Tween(obj, time, props, ease)
 	if not obj then return end
@@ -195,6 +198,20 @@ function Util.Tween(obj, time, props, ease)
 	end
 	local ok, tween = pcall(TweenService.Create, TweenService, obj, info, props)
 	if ok then tween:Play(); return tween end
+end
+
+--- Run `fn` exactly once when `tween` has finished. `Completed` is the real signal, so a close never waits
+--- on a guessed timer; the fallback only covers a tween that dies with its instance.
+function Util.OnDone(tween, time, fn)
+	local done = false
+	local function fire()
+		if done then return end
+		done = true
+		fn()
+	end
+	if not tween then fire(); return end
+	tween.Completed:Connect(fire)
+	task.delay((time or 0) + 0.25, fire)
 end
 
 --- Endless tween (ambient animation). reverses = ping-pong, delay = seconds before each cycle
@@ -356,6 +373,133 @@ function Util.Drag(target, onMove, onBegin, onEnd)
 	end)
 end
 
+--- A scrollbar that lives INSIDE the card it scrolls.
+--- The engine bar is switched off (it ignores rounded corners and pokes out of the card) and the canvas can
+--- never over-scroll. A slim thumb rides in a track inset from the corners: its length is visible / total
+--- (so it shrinks as content grows and grows as content shrinks) but never below `MinThumb`.
+--- o = { Parent, Inset = 10, Right = 6, Width = 3, MinThumb = 28, Color = "Muted" }
+--- Pass `Hidden = true` for lists that should only get the no-overscroll behaviour (the sidebar).
+function Util.Scroller(scroll, o)
+	o = o or {}
+	scroll.ScrollBarThickness = 0
+	scroll.ScrollBarImageTransparency = 1
+	scroll.ElasticBehavior = Enum.ElasticBehavior.Never
+	local ctl = { Scroll = scroll }
+	if o.Hidden then function ctl.Update() end; function ctl.Destroy() end; return ctl end
+
+	local host = o.Parent or scroll.Parent
+	local width, minThumb = o.Width or 3, o.MinThumb or 28
+	local inset, right = o.Inset or 10, o.Right or 6
+	local conns = {}
+
+	-- mirrors the scroller's rectangle so the track follows it when it is resized by a layout
+	local holder = New("Frame", {
+		Name = "ScrollOverlay", BackgroundTransparency = 1, Active = false, ZIndex = (scroll.ZIndex or 1) + 8,
+		AnchorPoint = scroll.AnchorPoint, Position = scroll.Position, Size = scroll.Size, Parent = host,
+	})
+	local track = New("TextButton", {
+		Name = "Track", AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -(right - 3), 0, inset), Size = UDim2.new(0, 9, 1, -inset * 2),
+		Visible = false, Parent = holder,
+	})
+	local thumb = New("Frame", {
+		Name = "Thumb", AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 0), Size = UDim2.fromOffset(width, minThumb),
+		BackgroundColor3 = WHITE, BackgroundTransparency = 0.72, Parent = track,
+	})
+	Util.Corner(thumb, 99)
+	Theme.Bind(thumb, { BackgroundColor3 = o.Color or "Muted" })
+
+	local dragging, hovering, token = false, false, 0
+	local function rest(active)
+		local a = dragging and 0.1 or ((hovering or active) and 0.35 or 0.72)
+		Util.Tween(thumb, 0.18, { BackgroundTransparency = a }, "Quad")
+	end
+
+	local function metrics()
+		local win, canvas = scroll.AbsoluteWindowSize.Y, scroll.AbsoluteCanvasSize.Y
+		local scale = Util.GetScale(scroll)
+		local trackH = track.AbsoluteSize.Y / scale
+		return win, canvas, scale, trackH
+	end
+
+	local function update()
+		if not scroll.Parent then return end
+		local win, canvas, scale, trackH = metrics()
+		local maxScroll = canvas - win
+		if win <= 0 or maxScroll <= 1 then
+			track.Visible = false
+			return
+		end
+		track.Visible = true
+		if trackH <= 0 then trackH = win / scale - inset * 2 end
+		local thumbH = Util.Clamp(trackH * (win / canvas), math.min(minThumb, trackH), trackH)
+		local frac = Util.Clamp(scroll.CanvasPosition.Y / maxScroll, 0, 1)
+		thumb.Size = UDim2.fromOffset(width, math.floor(thumbH + 0.5))
+		thumb.Position = UDim2.new(0.5, 0, 0, math.floor((trackH - thumbH) * frac + 0.5))
+	end
+	ctl.Update = update
+
+	local function poke()
+		token += 1
+		local mine = token
+		rest(true)
+		task.delay(1.1, function() if token == mine and thumb.Parent then rest(false) end end)
+	end
+
+	for _, prop in { "CanvasPosition", "AbsoluteCanvasSize", "AbsoluteWindowSize", "AbsoluteSize" } do
+		table.insert(conns, scroll:GetPropertyChangedSignal(prop):Connect(function()
+			update()
+			if prop == "CanvasPosition" and track.Visible then poke() end
+		end))
+	end
+	for _, prop in { "Size", "Position", "AnchorPoint" } do
+		table.insert(conns, scroll:GetPropertyChangedSignal(prop):Connect(function()
+			holder.Size, holder.Position, holder.AnchorPoint = scroll.Size, scroll.Position, scroll.AnchorPoint
+			update()
+		end))
+	end
+	table.insert(conns, track:GetPropertyChangedSignal("AbsoluteSize"):Connect(update))
+
+	-- drag the thumb (or press the track to jump there)
+	local startY, startCanvas
+	table.insert(conns, Util.Drag(track, function(pos)
+		local win, canvas, scale, trackH = metrics()
+		local maxScroll = canvas - win
+		local thumbH = Util.Clamp(trackH * (win / canvas), math.min(minThumb, trackH), trackH)
+		local travel = math.max(trackH - thumbH, 1)
+		scroll.CanvasPosition = Vector2.new(scroll.CanvasPosition.X, Util.Clamp(startCanvas + (pos.Y - startY) / scale / travel * maxScroll, 0, maxScroll))
+	end, function(input)
+		local win, canvas, scale, trackH = metrics()
+		local maxScroll = canvas - win
+		if maxScroll <= 1 then return false end
+		dragging = true
+		rest(true)
+		local thumbH = Util.Clamp(trackH * (win / canvas), math.min(minThumb, trackH), trackH)
+		local travel = math.max(trackH - thumbH, 1)
+		local localY = (input.Position.Y - track.AbsolutePosition.Y) / scale
+		local top = thumb.Position.Y.Offset
+		if localY < top or localY > top + thumbH then   -- pressed on the empty track: centre the thumb on the pointer
+			local frac = Util.Clamp((localY - thumbH / 2) / travel, 0, 1)
+			scroll.CanvasPosition = Vector2.new(scroll.CanvasPosition.X, frac * maxScroll)
+		end
+		startY, startCanvas = input.Position.Y, scroll.CanvasPosition.Y
+	end, function()
+		dragging = false
+		rest(false)
+	end))
+	table.insert(conns, track.MouseEnter:Connect(function() hovering = true; rest(true) end))
+	table.insert(conns, track.MouseLeave:Connect(function() hovering = false; rest(false) end))
+
+	function ctl.Destroy()
+		for _, c in conns do pcall(function() c:Disconnect() end) end
+		conns = {}
+		if holder.Parent then holder:Destroy() end
+	end
+	scroll.Destroying:Connect(ctl.Destroy)
+	task.defer(update)
+	update()
+	return ctl
+end
+
 -- ─────────────────────────────────────────────────────────────
 --  Depth shadows
 --  Floating surfaces (window, popups, dialogs, notifications) sit on three stacked
@@ -435,10 +579,11 @@ end
 
 --- Fade a surface's canvas and its shadow together
 function Util.FadeCanvas(canvas, a, time, ease, instant)
+	local main
 	if instant then
 		canvas.GroupTransparency = a
 	else
-		Util.Tween(canvas, time, { GroupTransparency = a }, ease)
+		main = Util.Tween(canvas, time, { GroupTransparency = a }, ease)
 	end
 	local sh = Util.Part(canvas, "Shadow")
 	if sh then Shadow.Fade(sh, a, time, ease, instant) end
@@ -450,6 +595,7 @@ function Util.FadeCanvas(canvas, a, time, ease, instant)
 			if instant then extra.GroupTransparency = a else Util.Tween(extra, time, { GroupTransparency = a }, ease) end
 		end
 	end
+	return main
 end
 
 -- ─────────────────────────────────────────────────────────────
@@ -577,7 +723,13 @@ Theme.Registry       = setmetatable({}, { __mode = "k" })
 Theme.Listeners      = {}
 Theme.Watchers       = {}  -- inst -> fn(name, theme, inst)   (removed automatically when inst is destroyed)
 Theme.StyleWatchers  = {}  -- inst -> fn(style, inst)
-Theme.Styles         = { "Plain", "Orbs", "Streaks", "Aurora", "Stars", "Grid", "Shards", "Rings" }
+Theme.Styles         = { "Plain", "Wash", "Dots", "Contour", "Ribbons", "Haze", "Ruled", "Aurora", "Stars", "Grid", "Embers", "Circuit", "Shards" }
+Theme.StyleGroups    = {   -- six backgrounds that read best on a light surface, six for a dark one (any of them works on both)
+	Light = { "Wash", "Dots", "Contour", "Ribbons", "Haze", "Ruled" },
+	Dark  = { "Aurora", "Stars", "Grid", "Embers", "Circuit", "Shards" },
+}
+Theme.StyleAlias     = { Orbs = "Haze", Streaks = "Ribbons", Rings = "Contour" }   -- names from older versions
+Theme.ModeListeners  = {}
 Theme.Specs          = {}      -- name -> { Spec, Compact }  (the source every mode is built from)
 Theme.Mode           = "Dark"  -- "Dark" | "Light": one switch for every theme
 Theme.ModeExplicit   = false   -- true once the user (or the script) chose a mode on purpose
@@ -601,60 +753,68 @@ local function fitAccent(c, dark)
 end
 
 --- Build a full token set from a compact spec, for one mode.
---- spec = { Base = Color3?, Accent = Color3, Accent2 = Color3?, Style = string?, Override = {token = value}? }
---- A theme is a colour, not a mode: the same spec produces a Dark and a Light palette, and every surface
---- (window, sidebar, cards, inputs, popups, lines) is tinted by the theme's own colour in both.
+--- spec = { Mode = "Dark" | "Light", Base = Color3, Accent = Color3, Accent2 = Color3?, Style = string?, Pair = "Name"?, Override = {token = value}? }
+---   Base     the colour every surface is made from. For a dark theme pick a coloured, mid-dark value (not near black),
+---            for a light theme a pale tint: the window, sidebar, cards, inputs, strokes and text are all tinted by it.
+---   Accent / Accent2   the gradient pair used for buttons, bars, highlights and the background effects.
+---   Pair     the hand made twin in the other mode (used by Vesper:SetMode); without one a twin is derived from the accents.
 function Theme.Make(name, spec, mode)
-	mode = mode or Theme.Mode
+	mode = mode or spec.Mode or "Dark"
 	local dark = mode ~= "Light"
-	local accent = fitAccent(spec.Accent, dark)
-	local accent2 = fitAccent(spec.Accent2 or spec.Accent, dark)
-	local base = spec.Base or spec.Accent:Lerp(BLACK, 0.88)
-	local t = { Name = name, Mode = dark and "Dark" or "Light", Accent = accent, Accent2 = accent2, Style = spec.Style or "Plain" }
+	local a1 = fitAccent(spec.Accent, dark)
+	local a2 = fitAccent(spec.Accent2 or spec.Accent, dark)
+	local base = spec.Base
+	local derive = base == nil or (spec.Mode ~= nil and spec.Mode ~= mode)
+	if not derive then
+		-- a pale base cannot be a dark surface (and the other way round): rebuild it from the accent instead
+		local lum = Util.Luminance(base)
+		derive = (dark and lum > 0.34) or (not dark and lum < 0.5)
+	end
+	if derive then
+		-- the twin still carries the theme's own colour
+		base = dark and spec.Accent:Lerp(rgb(16, 15, 26), 0.84) or spec.Accent:Lerp(WHITE, 0.9)
+	end
+	local t ={ Name = name, Mode = dark and "Dark" or "Light", Accent = a1, Accent2 = a2, Style = spec.Style or "Plain" }
+	local b = base
 
 	if dark then
-		-- a legacy light base is not usable as a dark one: derive it from the accent instead
-		if Util.Luminance(base) > 0.45 then base = spec.Accent:Lerp(BLACK, 0.88) end
-		local b = base:Lerp(accent, 0.10)
-		t.Window     = b:Lerp(WHITE, 0.055)
-		t.Window2    = b:Lerp(accent, 0.20):Lerp(WHITE, 0.035)
-		t.Window3    = b:Lerp(accent2, 0.15):Lerp(BLACK, 0.10)
-		t.Sidebar    = b:Lerp(BLACK, 0.16)
-		t.Sidebar2   = t.Sidebar:Lerp(accent, 0.16)
-		t.Surface    = b:Lerp(WHITE, 0.075)
-		t.Card       = b:Lerp(WHITE, 0.12)
-		t.CardHover  = b:Lerp(WHITE, 0.175)
-		t.Input      = b:Lerp(WHITE, 0.20)
-		t.InputHover = b:Lerp(WHITE, 0.26)
-		t.Stroke     = b:Lerp(WHITE, 0.66)
-		t.Popup      = b:Lerp(WHITE, 0.13)
-		t.Text       = b:Lerp(WHITE, 0.96)
-		t.SubText    = b:Lerp(WHITE, 0.74)
-		t.Muted      = b:Lerp(WHITE, 0.54)
+		t.Window     = b:Lerp(WHITE, 0.04)
+		t.Window2    = b:Lerp(a2, 0.10):Lerp(WHITE, 0.02)
+		t.Window3    = b:Lerp(a1, 0.18):Lerp(BLACK, 0.14)
+		t.Sidebar    = b:Lerp(BLACK, 0.30)
+		t.Sidebar2   = t.Sidebar:Lerp(a1, 0.09)
+		t.Surface    = b:Lerp(WHITE, 0.035)
+		t.Card       = b:Lerp(WHITE, 0.085):Lerp(a1, 0.035)
+		t.CardHover  = b:Lerp(WHITE, 0.14):Lerp(a1, 0.05)
+		t.Input      = b:Lerp(WHITE, 0.15):Lerp(a1, 0.04)
+		t.InputHover = b:Lerp(WHITE, 0.21):Lerp(a1, 0.06)
+		t.Stroke     = b:Lerp(WHITE, 0.50):Lerp(a1, 0.22)
+		t.Popup      = b:Lerp(WHITE, 0.09):Lerp(a1, 0.03)
+		t.Text       = b:Lerp(WHITE, 0.95)
+		t.SubText    = b:Lerp(WHITE, 0.72)
+		t.Muted      = b:Lerp(WHITE, 0.52)
 		for k, v in STATUS_DARK do t[k] = v end
 	else
-		-- a pale wash of the theme's own colour
-		local b = base:Lerp(accent, 0.24):Lerp(WHITE, 0.90)
 		t.Window     = b:Lerp(WHITE, 0.35)
-		t.Window2    = b:Lerp(accent, 0.10):Lerp(WHITE, 0.20)
-		t.Window3    = b:Lerp(accent2, 0.17)
-		t.Sidebar    = b:Lerp(BLACK, 0.045):Lerp(accent, 0.05)
-		t.Sidebar2   = t.Sidebar:Lerp(accent, 0.10)
-		t.Surface    = b:Lerp(BLACK, 0.025)
-		t.Card       = b:Lerp(WHITE, 0.72)
-		t.CardHover  = b:Lerp(WHITE, 0.48)
-		t.Input      = b:Lerp(BLACK, 0.07)
-		t.InputHover = b:Lerp(BLACK, 0.11)
-		t.Stroke     = b:Lerp(BLACK, 0.50)
-		t.Popup      = b:Lerp(WHITE, 0.90)
+		t.Window2    = b:Lerp(a2, 0.07)
+		t.Window3    = b:Lerp(a1, 0.14)
+		t.Sidebar    = b:Lerp(BLACK, 0.045):Lerp(a1, 0.05)
+		t.Sidebar2   = t.Sidebar:Lerp(a1, 0.08)
+		t.Surface    = b:Lerp(BLACK, 0.03)
+		t.Card       = b:Lerp(WHITE, 0.70)
+		t.CardHover  = b:Lerp(WHITE, 0.45)
+		t.Input      = b:Lerp(BLACK, 0.06):Lerp(a1, 0.03)
+		t.InputHover = b:Lerp(BLACK, 0.10):Lerp(a1, 0.04)
+		t.Stroke     = b:Lerp(BLACK, 0.40):Lerp(a1, 0.25)
+		t.Popup      = b:Lerp(WHITE, 0.85)
 		t.Text       = b:Lerp(BLACK, 0.90)
 		t.SubText    = b:Lerp(BLACK, 0.62)
 		t.Muted      = b:Lerp(BLACK, 0.45)
 		for k, v in STATUS_LIGHT do t[k] = v end
 	end
 
-	local lum = (Util.Luminance(accent) + Util.Luminance(accent2)) / 2
-	t.AccentText = lum > 0.62 and rgb(18, 18, 22) or rgb(255, 255, 255)
+	local accentLum = (Util.Luminance(a1) + Util.Luminance(a2)) / 2
+	t.AccentText = accentLum > 0.62 and rgb(18, 18, 22) or rgb(255, 255, 255)
 	t.Shadow = BLACK
 
 	if spec.Override then
@@ -663,11 +823,14 @@ function Theme.Make(name, spec, mode)
 	return t
 end
 
---- Rebuild one theme's tokens for the current mode
-function Theme.Build(name)
+Theme.Groups   = { Dark = {}, Light = {}, Holiday = {}, Custom = {} }
+Theme.Variants = {}   -- "name|Mode" -> the derived twin of a theme that has no hand made Pair
+
+--- Rebuild one theme's tokens (in `mode`, default: its own)
+function Theme.Build(name, mode)
 	local def = Theme.Specs[name]
 	local spec = def.Spec
-	if def.Compact then return Theme.Make(name, spec, Theme.Mode) end
+	if def.Compact then return Theme.Make(name, spec, mode or spec.Mode or Theme.Mode) end
 	local parent = Theme.Themes[spec.Extends or "Vesper"] or Theme.Themes.Vesper
 	local theme = { Name = name }
 	for k, v in parent do theme[k] = v end
@@ -685,48 +848,250 @@ function Theme.Build(name)
 end
 
 --- Register a theme. Pass a compact spec (has `Accent`) or a partial token table with `Extends`.
-function Theme.Add(name, spec)
-	Theme.Specs[name] = { Spec = spec, Compact = spec.Accent ~= nil and spec.Extends == nil }
-	if not Theme.Themes[name] then table.insert(Theme.Order, name) end
+--- group = "Dark" | "Light" | "Holiday" | "Custom" (only used to sort the theme picker)
+function Theme.Add(name, spec, group)
+	local compact = spec.Accent ~= nil and spec.Extends == nil
+	if not group then group = compact and (spec.Mode or "Custom") or "Custom" end
+	Theme.Specs[name] = { Spec = spec, Compact = compact, Group = group, Holiday = Theme.Specs[name] and Theme.Specs[name].Holiday }
+	if not Theme.Themes[name] then
+		table.insert(Theme.Order, name)
+		local list = Theme.Groups[group] or Theme.Groups.Custom
+		table.insert(list, name)
+	end
+	for key in Theme.Variants do
+		if string.sub(key, 1, #name + 1) == name .. "|" then Theme.Variants[key] = nil end
+	end
 	Theme.Themes[name] = Theme.Build(name)
 	if Theme.Current and Theme.Current.Name == name and Theme.Set then Theme.Set(name, true) end
 	return Theme.Themes[name]
 end
 
--- ── Built-in themes (each one works in Dark and in Light) ───────
-Theme.Add("Vesper",     { Base = rgb(17, 18, 27),  Accent = rgb(124, 92, 255),  Accent2 = rgb(56, 189, 248),  Style = "Orbs" })
-Theme.Add("Midnight",   { Base = rgb(11, 16, 29),  Accent = rgb(59, 130, 246),  Accent2 = rgb(34, 211, 238),  Style = "Stars" })
-Theme.Add("Obsidian",   { Base = rgb(14, 14, 17),  Accent = rgb(226, 232, 240), Accent2 = rgb(148, 163, 184), Style = "Shards" })
-Theme.Add("Graphite",   { Base = rgb(25, 26, 30),  Accent = rgb(96, 165, 250),  Accent2 = rgb(129, 140, 248), Style = "Grid" })
-Theme.Add("Slate",      { Base = rgb(28, 37, 52),  Accent = rgb(56, 189, 248),  Accent2 = rgb(129, 140, 248), Style = "Aurora" })
-Theme.Add("Abyss",      { Base = rgb(7, 12, 16),   Accent = rgb(45, 212, 191),  Accent2 = rgb(59, 130, 246),  Style = "Rings" })
-Theme.Add("Ocean",      { Base = rgb(8, 21, 27),   Accent = rgb(20, 184, 166),  Accent2 = rgb(56, 189, 248),  Style = "Aurora" })
-Theme.Add("Emerald",    { Base = rgb(10, 21, 16),  Accent = rgb(74, 222, 128),  Accent2 = rgb(163, 230, 53),  Style = "Orbs" })
-Theme.Add("Aurora",     { Base = rgb(10, 17, 27),  Accent = rgb(52, 211, 153),  Accent2 = rgb(167, 139, 250), Style = "Aurora" })
-Theme.Add("Crimson",    { Base = rgb(25, 12, 16),  Accent = rgb(244, 63, 94),   Accent2 = rgb(251, 146, 60),  Style = "Streaks" })
-Theme.Add("Ember",      { Base = rgb(23, 15, 11),  Accent = rgb(251, 146, 60),  Accent2 = rgb(239, 68, 68),   Style = "Streaks" })
-Theme.Add("Sunset",     { Base = rgb(25, 14, 29),  Accent = rgb(251, 113, 133), Accent2 = rgb(251, 191, 36),  Style = "Orbs" })
-Theme.Add("Rose",       { Base = rgb(27, 14, 21),  Accent = rgb(251, 113, 133), Accent2 = rgb(244, 114, 182), Style = "Orbs" })
-Theme.Add("Plum",       { Base = rgb(28, 16, 33),  Accent = rgb(217, 70, 239),  Accent2 = rgb(251, 113, 133), Style = "Shards" })
-Theme.Add("Amethyst",   { Base = rgb(19, 13, 30),  Accent = rgb(168, 85, 247),  Accent2 = rgb(236, 72, 153),  Style = "Stars" })
-Theme.Add("Nord",       { Base = rgb(30, 35, 45),  Accent = rgb(136, 192, 208), Accent2 = rgb(129, 161, 193), Style = "Aurora" })
-Theme.Add("Dracula",    { Base = rgb(33, 34, 44),  Accent = rgb(189, 147, 249), Accent2 = rgb(255, 121, 198), Style = "Orbs" })
-Theme.Add("Mocha",      { Base = rgb(30, 30, 46),  Accent = rgb(203, 166, 247), Accent2 = rgb(137, 180, 250), Style = "Rings" })
-Theme.Add("Cyberpunk",  { Base = rgb(14, 10, 25),  Accent = rgb(252, 238, 10),  Accent2 = rgb(0, 240, 255),   Style = "Grid" })
-Theme.Add("Nebula",     { Base = rgb(15, 10, 28),  Accent = rgb(192, 132, 252), Accent2 = rgb(244, 114, 182), Style = "Stars" })
-Theme.Add("Inferno",    { Base = rgb(20, 9, 9),    Accent = rgb(248, 113, 53),  Accent2 = rgb(250, 204, 21),  Style = "Streaks" })
-Theme.Add("Glacier",    { Base = rgb(9, 17, 26),   Accent = rgb(125, 211, 252), Accent2 = rgb(165, 180, 252), Style = "Rings" })
-Theme.Add("Matrix",     { Base = rgb(6, 14, 9),    Accent = rgb(34, 197, 94),   Accent2 = rgb(132, 204, 22),  Style = "Grid" })
-Theme.Add("Twilight",   { Base = rgb(14, 15, 32),  Accent = rgb(99, 102, 241),  Accent2 = rgb(45, 212, 191),  Style = "Aurora" })
--- these six used to be light-only themes; they are plain colour themes now
-Theme.Add("Paper",      { Mode = "Light", Base = rgb(24, 24, 27), Accent = rgb(58, 58, 66),   Accent2 = rgb(112, 112, 124), Style = "Shards" })
-Theme.Add("Daylight",   { Mode = "Light", Base = rgb(17, 18, 36), Accent = rgb(99, 102, 241),  Accent2 = rgb(14, 165, 233),  Style = "Orbs" })
-Theme.Add("Blossom",    { Mode = "Light", Base = rgb(30, 16, 34), Accent = rgb(217, 70, 239),  Accent2 = rgb(244, 114, 182), Style = "Orbs" })
-Theme.Add("Latte",      { Mode = "Light", Base = rgb(22, 17, 34), Accent = rgb(136, 57, 239),  Accent2 = rgb(30, 102, 245),  Style = "Aurora" })
-Theme.Add("Mint",       { Mode = "Light", Base = rgb(12, 26, 22), Accent = rgb(16, 185, 129),  Accent2 = rgb(45, 212, 191),  Style = "Streaks" })
-Theme.Add("Sand",       { Mode = "Light", Base = rgb(28, 22, 14), Accent = rgb(217, 119, 6),   Accent2 = rgb(234, 88, 12),   Style = "Orbs" })
+--- The twin of `name` in the other mode: its Pair when it has one, otherwise one derived from its accents
+function Theme.Variant(name, mode)
+	local def = Theme.Specs[name]
+	if not def then return nil end
+	if def.Compact and def.Spec.Mode == mode then return Theme.Themes[name] end
+	if def.Compact and def.Spec.Pair and Theme.Themes[def.Spec.Pair] and Theme.Themes[def.Spec.Pair].Mode == mode then
+		return Theme.Themes[def.Spec.Pair]
+	end
+	if not def.Compact then return nil end
+	local key = name .. "|" .. mode
+	if not Theme.Variants[key] then Theme.Variants[key] = Theme.Make(name, def.Spec, mode) end
+	return Theme.Variants[key]
+end
+
+-- ── The twelve built-in themes: six dark, six light ──────────────
+--  Every one is a distinct colour story (not the same purple-blue gradient in different coats). Dark themes
+--  start from a coloured mid-dark base, so the window, sidebar, cards and inputs all carry the theme's hue.
+Theme.Add("Vesper",    { Mode = "Dark",  Base = rgb(36, 28, 62),  Accent = rgb(255, 178, 92),  Accent2 = rgb(240, 98, 146),  Style = "Aurora",  Pair = "Lilac Haze" })
+Theme.Add("Nightfall", { Mode = "Dark",  Base = rgb(21, 31, 64),  Accent = rgb(122, 154, 255), Accent2 = rgb(255, 154, 124), Style = "Stars",   Pair = "Glacier" })
+Theme.Add("Verdigris", { Mode = "Dark",  Base = rgb(13, 45, 47),  Accent = rgb(64, 214, 178),  Accent2 = rgb(170, 228, 98),  Style = "Grid",    Pair = "Seafoam" })
+Theme.Add("Oxblood",   { Mode = "Dark",  Base = rgb(50, 19, 30),  Accent = rgb(255, 124, 104), Accent2 = rgb(246, 194, 108), Style = "Embers",  Pair = "Daybreak" })
+Theme.Add("Brass",     { Mode = "Dark",  Base = rgb(17, 29, 46),  Accent = rgb(224, 176, 98),  Accent2 = rgb(190, 120, 86),  Style = "Circuit", Pair = "Sandstone" })
+Theme.Add("Moss",      { Mode = "Dark",  Base = rgb(24, 40, 30),  Accent = rgb(158, 210, 120), Accent2 = rgb(228, 184, 90),  Style = "Shards",  Pair = "Meadow" })
+
+Theme.Add("Lilac Haze",{ Mode = "Light", Base = rgb(240, 235, 251), Accent = rgb(112, 82, 222), Accent2 = rgb(214, 84, 168), Style = "Haze",    Pair = "Vesper" })
+Theme.Add("Glacier",   { Mode = "Light", Base = rgb(229, 241, 251), Accent = rgb(38, 98, 210),  Accent2 = rgb(24, 170, 196), Style = "Contour", Pair = "Nightfall" })
+Theme.Add("Seafoam",   { Mode = "Light", Base = rgb(228, 246, 239), Accent = rgb(16, 148, 136), Accent2 = rgb(58, 138, 214), Style = "Wash",    Pair = "Verdigris" })
+Theme.Add("Daybreak",  { Mode = "Light", Base = rgb(252, 241, 231), Accent = rgb(232, 108, 58), Accent2 = rgb(222, 78, 128), Style = "Ribbons", Pair = "Oxblood" })
+Theme.Add("Sandstone", { Mode = "Light", Base = rgb(246, 238, 221), Accent = rgb(192, 86, 54),  Accent2 = rgb(204, 142, 44), Style = "Ruled",   Pair = "Brass" })
+Theme.Add("Meadow",    { Mode = "Light", Base = rgb(235, 246, 226), Accent = rgb(54, 144, 66),  Accent2 = rgb(186, 156, 24), Style = "Dots",    Pair = "Moss" })
 
 Theme.Current = Theme.Themes.Vesper
+Theme.Mode = "Dark"
+
+-- ── Holiday themes ───────────────────────────────────────────
+--  26 special themes that live inside the library. Each one knows when it is "its day" and is an ordinary theme
+--  otherwise (pick it in the Themes tab, or Vesper:SetTheme("Halloween")). Change them or add your own:
+--    Vesper:EditHoliday("Halloween", { Accent = Color3.fromRGB(...), Style = "Embers" })
+--    Vesper:AddHoliday("Release day", { Month = 3, Day = 9, Length = 3, Base = ..., Accent = ..., Accent2 = ... })
+--    Vesper:ApplyHoliday()   -- today's holiday theme, if there is one
+--  Rules:  { Month, Day }  |  { Month, Weekday = 1 (Sun) .. 7 (Sat), Nth = 1..4 | -1 (last) }  |  { Easter = days from Easter }  |  { Hanukkah = true }
+Theme.Holidays     = {}
+Theme.HolidayIndex = {}
+Theme.HolidayAuto  = false
+
+local function dow(y, m, d)   -- 0 = Sunday
+	local t = { 0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4 }
+	if m < 3 then y -= 1 end
+	return (y + y // 4 - y // 100 + y // 400 + t[m] + d) % 7
+end
+local function isLeap(y) return (y % 4 == 0 and y % 100 ~= 0) or y % 400 == 0 end
+local function monthDays(y, m) return ({ 31, isLeap(y) and 29 or 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 })[m] end
+local function daysFromCivil(y, m, d)
+	if m <= 2 then y -= 1 end
+	local era = y // 400
+	local yoe = y - era * 400
+	local doy = (153 * (m + (m > 2 and -3 or 9)) + 2) // 5 + d - 1
+	local doe = yoe * 365 + yoe // 4 - yoe // 100 + doy
+	return era * 146097 + doe - 719468
+end
+local function civilFromDays(z)
+	z += 719468
+	local era = z // 146097
+	local doe = z - era * 146097
+	local yoe = (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365
+	local y = yoe + era * 400
+	local doy = doe - (365 * yoe + yoe // 4 - yoe // 100)
+	local mp = (5 * doy + 2) // 153
+	local d = doy - (153 * mp + 2) // 5 + 1
+	local m = mp < 10 and mp + 3 or mp - 9
+	if m <= 2 then y += 1 end
+	return y, m, d
+end
+Theme.DaysFromCivil, Theme.CivilFromDays = daysFromCivil, civilFromDays
+
+--- Gregorian Easter Sunday (anonymous / Meeus algorithm)
+function Theme.Easter(y)
+	local a, b, c = y % 19, y // 100, y % 100
+	local d, e = b // 4, b % 4
+	local f = (b + 8) // 25
+	local g = (b - f + 1) // 3
+	local h = (19 * a + b - d - g + 15) % 30
+	local i, k = c // 4, c % 4
+	local l = (32 + 2 * e + 2 * i - h - k) % 7
+	local m = (a + 11 * h + 22 * l) // 451
+	local month = (h + l - 7 * m + 114) // 31
+	local day = (h + l - 7 * m + 114) % 31 + 1
+	return month, day
+end
+
+--- Gregorian date of 25 Kislev (the first day of Hanukkah) in the Hebrew year that starts in autumn `y`
+local function hanukkahStart(y)
+	local function elapsed(year)
+		local months = (235 * year - 234) // 19
+		local parts = 12084 + 13753 * months
+		local days = 29 * months + parts // 25920
+		if (3 * (days + 1)) % 7 < 3 then days += 1 end
+		return days
+	end
+	local function newYear(year)
+		local n0, n1, n2 = elapsed(year - 1), elapsed(year), elapsed(year + 1)
+		local delay = (n2 - n1 == 356) and 2 or ((n1 - n0 == 382) and 1 or 0)
+		return -1373427 + n1 + delay
+	end
+	local hy = y + 3761
+	local longMarheshvan = (newYear(hy + 1) - newYear(hy)) % 10 == 5
+	local rd = newYear(hy) + 30 + (longMarheshvan and 30 or 29) + 24
+	return civilFromDays(rd - 719163)
+end
+
+--- first day (y, m, d) of a holiday in year `y`
+function Theme.HolidayStart(def, y)
+	local r = def.Rule
+	if r.Easter then
+		local m, d = Theme.Easter(y)
+		return civilFromDays(daysFromCivil(y, m, d) + r.Easter)
+	elseif r.Hanukkah then
+		-- the first candle is lit on the evening before 25 Kislev
+		local hy, hm, hd = hanukkahStart(y)
+		return civilFromDays(daysFromCivil(hy, hm, hd) - 1)
+	elseif r.Weekday then
+		local wd = r.Weekday - 1   -- 0 = Sunday
+		if (r.Nth or 1) > 0 then
+			local first = dow(y, r.Month, 1)
+			return y, r.Month, 1 + ((wd - first) % 7) + ((r.Nth or 1) - 1) * 7
+		end
+		local last = monthDays(y, r.Month)
+		return y, r.Month, last - ((dow(y, r.Month, last) - wd) % 7)
+	end
+	return y, r.Month, r.Day
+end
+
+--- "YYYY-MM-DD" helper
+local function dateString(y, m, d) return string.format("%04d-%02d-%02d", y, m, d) end
+
+--- Is `def` on at (y, m, d)?  (Kwanzaa and Hanukkah can start in the year before)
+function Theme.HolidayActive(def, y, m, d)
+	local today = daysFromCivil(y, m, d)
+	for _, year in { y - 1, y } do
+		local sy, sm, sd = Theme.HolidayStart(def, year)
+		local start = daysFromCivil(sy, sm, sd)
+		if today >= start and today <= start + (def.Length or 1) - 1 then return true end
+	end
+	return false
+end
+
+--- The holidays that are on at a date (default: today), in priority order
+function Theme.HolidaysOn(y, m, d)
+	if not y then
+		local ok, now = pcall(os.date, "*t")
+		if not ok or type(now) ~= "table" then return {} end
+		y, m, d = now.year, now.month, now.day
+	end
+	local out = {}
+	for _, def in Theme.Holidays do
+		if Theme.HolidayActive(def, y, m, d) then table.insert(out, def) end
+	end
+	return out
+end
+
+local function holidaySpec(def)
+	local spec = {}
+	for k, v in def.Spec do spec[k] = v end
+	return spec
+end
+
+--- Register (or replace) a holiday. def = { Name, Rule..., Length, Spec = { Mode, Base, Accent, Accent2, Style } }
+function Theme.AddHoliday(def)
+	assert(type(def) == "table" and def.Name and def.Rule and def.Spec, "AddHoliday: Name, Rule and Spec are required")
+	local existing = Theme.HolidayIndex[def.Name]
+	if existing then
+		for i, h in Theme.Holidays do if h == existing then Theme.Holidays[i] = def; break end end
+	else
+		table.insert(Theme.Holidays, def)
+	end
+	Theme.HolidayIndex[def.Name] = def
+	Theme.Add(def.Name, holidaySpec(def), "Holiday")
+	Theme.Specs[def.Name].Holiday = def
+	return def
+end
+
+local function H(name, rule, length, spec)
+	Theme.AddHoliday({ Name = name, Rule = rule, Length = length, Spec = spec })
+end
+
+-- the federal holidays ------------------------------------------------------------------------------------------
+H("New Year's Day",                          { Month = 1, Day = 1 },                          1, { Mode = "Dark",  Base = rgb(18, 22, 44),  Accent = rgb(240, 200, 98),  Accent2 = rgb(188, 204, 232), Style = "Stars" })
+H("Birthday of Martin Luther King, Jr.",     { Month = 1, Weekday = 2, Nth = 3 },             1, { Mode = "Dark",  Base = rgb(22, 30, 50),  Accent = rgb(236, 178, 76),  Accent2 = rgb(124, 154, 206), Style = "Contour" })
+H("Washington's Birthday",                   { Month = 2, Weekday = 2, Nth = 3 },             1, { Mode = "Light", Base = rgb(243, 239, 229), Accent = rgb(32, 62, 124),  Accent2 = rgb(180, 36, 54),   Style = "Ruled" })
+H("Memorial Day",                            { Month = 5, Weekday = 2, Nth = -1 },            1, { Mode = "Dark",  Base = rgb(21, 29, 46),  Accent = rgb(214, 62, 72),   Accent2 = rgb(222, 226, 238), Style = "Contour" })
+H("Juneteenth National Independence Day",   { Month = 6, Day = 19 },                         1, { Mode = "Dark",  Base = rgb(33, 21, 19),  Accent = rgb(232, 66, 52),   Accent2 = rgb(66, 172, 104),  Style = "Dots" })
+H("Independence Day",                        { Month = 7, Day = 4 },                          1, { Mode = "Dark",  Base = rgb(15, 25, 54),  Accent = rgb(228, 58, 66),   Accent2 = rgb(204, 222, 255), Style = "Stars" })
+H("Labor Day",                               { Month = 9, Weekday = 2, Nth = 1 },             1, { Mode = "Light", Base = rgb(238, 236, 229), Accent = rgb(50, 92, 150),  Accent2 = rgb(226, 124, 38),  Style = "Grid" })
+H("Columbus Day",                            { Month = 10, Weekday = 2, Nth = 2 },            1, { Mode = "Dark",  Base = rgb(15, 38, 54),  Accent = rgb(232, 202, 124), Accent2 = rgb(72, 164, 204),  Style = "Contour" })
+H("Veterans Day",                            { Month = 11, Day = 11 },                        1, { Mode = "Dark",  Base = rgb(26, 33, 36),  Accent = rgb(196, 44, 54),   Accent2 = rgb(204, 184, 126), Style = "Shards" })
+H("Thanksgiving Day",                        { Month = 11, Weekday = 5, Nth = 4 },            1, { Mode = "Dark",  Base = rgb(44, 26, 17),  Accent = rgb(230, 124, 42),  Accent2 = rgb(206, 156, 64),  Style = "Embers" })
+H("Christmas Day",                           { Month = 12, Day = 25 },                        1, { Mode = "Dark",  Base = rgb(15, 44, 31),  Accent = rgb(226, 54, 58),   Accent2 = rgb(244, 204, 96),  Style = "Stars" })
+
+-- the other observances -----------------------------------------------------------------------------------------
+H("Groundhog Day",                           { Month = 2, Day = 2 },                          1, { Mode = "Light", Base = rgb(243, 234, 222), Accent = rgb(142, 96, 60),  Accent2 = rgb(212, 170, 92),  Style = "Contour" })
+H("Valentine's Day",                         { Month = 2, Day = 14 },                         1, { Mode = "Light", Base = rgb(252, 237, 241), Accent = rgb(212, 40, 92),  Accent2 = rgb(240, 122, 152), Style = "Haze" })
+H("St. Patrick's Day",                       { Month = 3, Day = 17 },                         1, { Mode = "Dark",  Base = rgb(13, 40, 25),  Accent = rgb(66, 204, 102),  Accent2 = rgb(234, 204, 74),  Style = "Dots" })
+H("April Fools' Day",                        { Month = 4, Day = 1 },                          1, { Mode = "Dark",  Base = rgb(33, 22, 48),  Accent = rgb(252, 214, 44),  Accent2 = rgb(64, 204, 224),  Style = "Dots" })
+H("Good Friday",                             { Easter = -2 },                                 1, { Mode = "Dark",  Base = rgb(29, 24, 34),  Accent = rgb(164, 144, 204), Accent2 = rgb(194, 172, 152), Style = "Contour" })
+H("Easter Sunday",                           { Easter = 0 },                                  1, { Mode = "Light", Base = rgb(249, 243, 252), Accent = rgb(168, 118, 222), Accent2 = rgb(104, 200, 168), Style = "Wash" })
+H("Easter Monday",                           { Easter = 1 },                                  1, { Mode = "Light", Base = rgb(243, 250, 235), Accent = rgb(238, 156, 56),  Accent2 = rgb(118, 190, 88),  Style = "Dots" })
+H("Earth Day",                               { Month = 4, Day = 22 },                         1, { Mode = "Light", Base = rgb(229, 244, 235), Accent = rgb(28, 138, 88),  Accent2 = rgb(40, 120, 204),  Style = "Wash" })
+H("Cinco de Mayo",                           { Month = 5, Day = 5 },                          1, { Mode = "Dark",  Base = rgb(24, 33, 28),  Accent = rgb(232, 62, 62),   Accent2 = rgb(62, 194, 112),  Style = "Ribbons" })
+H("Mother's Day",                            { Month = 5, Weekday = 1, Nth = 2 },             1, { Mode = "Light", Base = rgb(252, 239, 237), Accent = rgb(218, 88, 122),  Accent2 = rgb(240, 160, 130), Style = "Haze" })
+H("Flag Day",                                { Month = 6, Day = 14 },                         1, { Mode = "Dark",  Base = rgb(17, 24, 52),  Accent = rgb(212, 50, 62),   Accent2 = rgb(238, 240, 250), Style = "Ribbons" })
+H("Father's Day",                            { Month = 6, Weekday = 1, Nth = 3 },             1, { Mode = "Dark",  Base = rgb(21, 32, 42),  Accent = rgb(62, 142, 204),  Accent2 = rgb(184, 152, 104), Style = "Circuit" })
+H("Halloween",                               { Month = 10, Day = 31 },                        1, { Mode = "Dark",  Base = rgb(30, 17, 34),  Accent = rgb(255, 122, 24),  Accent2 = rgb(154, 74, 224),  Style = "Embers" })
+H("Hanukkah",                                { Hanukkah = true },                             9, { Mode = "Dark",  Base = rgb(13, 27, 62),  Accent = rgb(96, 154, 244),  Accent2 = rgb(236, 240, 250), Style = "Stars" })
+H("Kwanzaa",                                 { Month = 12, Day = 26 },                        7, { Mode = "Dark",  Base = rgb(29, 22, 19),  Accent = rgb(214, 44, 44),   Accent2 = rgb(52, 164, 88),   Style = "Dots" })
+
+--- Apply a holiday's theme. name = nil / "Auto" -> today's holiday (returns nil when today has none)
+function Theme.ApplyHoliday(name, silent)
+	if name == nil or name == "Auto" then
+		local today = Theme.HolidaysOn()
+		if #today == 0 then return nil end
+		name = today[1].Name
+	end
+	if not Theme.HolidayIndex[name] then return nil end
+	Theme.Set(name, silent)
+	return name
+end
 
 -- ── Binding ──────────────────────────────────────────────────
 local function resolve(token)
@@ -791,7 +1156,8 @@ function Theme.Refresh(animate)
 end
 
 function Theme.GetStyle()
-	return Theme.StyleOverride or Theme.Current.Style or "Plain"
+	local style = Theme.StyleOverride or Theme.Current.Style or "Plain"
+	return Theme.StyleAlias[style] or style
 end
 
 function Theme.FireStyle()
@@ -816,34 +1182,58 @@ end
 function Theme.Set(name, silent)
 	local theme = Theme.Themes[name]
 	if not theme then return false end
+	local def = Theme.Specs[name]
+	-- a theme without a mode of its own (a custom spec) follows the global mode
+	if def and def.Compact and def.Spec.Mode == nil and theme.Mode ~= Theme.Mode then
+		theme = Theme.Build(name, Theme.Mode)
+		Theme.Themes[name] = theme
+	end
 	local prevStyle = Theme.GetStyle()
+	local prevMode = Theme.Mode
 	Theme.Current = theme
+	Theme.Mode = theme.Mode
 	Theme.Refresh(not silent)
 	for _, fn in Theme.Listeners do Util.Fire(fn, name, theme) end
 	for inst, fn in Theme.Watchers do pcall(fn, name, theme, inst) end
 	if Theme.GetStyle() ~= prevStyle then Theme.FireStyle() end
+	if prevMode ~= Theme.Mode then
+		for _, fn in Theme.ModeListeners do Util.Fire(fn, Theme.Mode) end
+	end
 	return true
 end
 
---- "Dark" | "Light". Every theme has both; the colour stays, the surfaces change.
+--- "Dark" | "Light". Switches the current theme to its twin in that mode: the hand made Pair when it has one
+--- (Vesper <-> Lilac Haze), otherwise a twin derived from the theme's own accents.
 function Theme.SetMode(mode, silent)
 	mode = (type(mode) == "string" and string.lower(mode) == "light") and "Light" or "Dark"
 	Theme.ModeExplicit = true
-	if Theme.Mode == mode then return true end
+	local cur = Theme.Current
+	if cur.Mode == mode then Theme.Mode = mode; return true end
+	local def = Theme.Specs[cur.Name]
+	local twin
+	if def and def.Compact and def.Spec.Mode == nil then
+		-- a custom theme with no mode of its own: rebuild it in the new mode
+		Theme.Mode = mode
+		twin = Theme.Build(cur.Name, mode)
+		Theme.Themes[cur.Name] = twin
+	else
+		twin = Theme.Variant(cur.Name, mode) or Theme.Themes.Vesper
+	end
+	local prevStyle = Theme.GetStyle()
 	Theme.Mode = mode
-	local currentName = Theme.Current.Name
-	for _, name in Theme.Order do Theme.Themes[name] = Theme.Build(name) end
-	Theme.Current = Theme.Themes[currentName] or Theme.Themes.Vesper
+	Theme.Current = twin
 	Theme.Refresh(not silent)
-	for _, fn in Theme.Listeners do Util.Fire(fn, Theme.Current.Name, Theme.Current) end
-	for inst, fn in Theme.Watchers do pcall(fn, Theme.Current.Name, Theme.Current, inst) end
-	Theme.FireStyle()
+	for _, fn in Theme.Listeners do Util.Fire(fn, twin.Name, twin) end
+	for inst, fn in Theme.Watchers do pcall(fn, twin.Name, twin, inst) end
+	if Theme.GetStyle() ~= prevStyle then Theme.FireStyle() end
+	for _, fn in Theme.ModeListeners do Util.Fire(fn, mode) end
 	return true
 end
 
 --- nil / "Default" follows the theme's own style
 function Theme.SetStyle(style)
 	if style == "Default" or style == "Theme" or style == "" then style = nil end
+	if style ~= nil then style = Theme.StyleAlias[style] or style end
 	if style ~= nil and not table.find(Theme.Styles, style) then return false end
 	local prev = Theme.GetStyle()
 	Theme.StyleOverride = style
@@ -1030,17 +1420,10 @@ function Edge.Set(opts)
 	Edge.ApplyAll()
 end
 
---- Press feedback: the surface squeezes a little and springs back. UIScale never changes layout.
-function Util.PressScale(btn, target, amount, rest)
-	target = target or btn
-	local sc = target:FindFirstChild("PressScale") or New("UIScale", { Name = "PressScale", Parent = target })
-	amount = amount or 0.97
-	btn.MouseButton1Down:Connect(function() Util.Tween(sc, 0.1, { Scale = amount }, "Quad") end)
-	local function up() Util.Tween(sc, 0.4, { Scale = rest or 1 }, "Back") end
-	btn.MouseButton1Up:Connect(up)
-	btn.MouseLeave:Connect(up)
-	return sc
-end
+--- v1.10: press-scaling is gone. A UIScale on an element that lives inside a layout resized the row
+--- every time it was pressed (the "button gets taller when clicked" bug), and growing / shrinking
+--- controls is not how professional UI behaves. Kept as a no-op so third-party code can still call it.
+function Util.PressScale() return nil end
 -- GENERATED by tools/build.py from latte-soft/lucide-roblox (Lucide v0.363.0). Do not edit.
 local ICON_DATA = {
 	[48] = {
@@ -1085,6 +1468,164 @@ local function cleanName(name)
 	name = string.gsub(name, "_", "-")
 	return Icons.Aliases[name] or name
 end
+
+-- ── Quality, registry and real preloading ───────────────────
+--  Quality  "High" (default)  every icon is drawn from the 256px sheets
+--           "Auto"            256px above 28px, 48px below
+--           "Standard"        48px sheets up to 48px (the old behaviour, lightest to load)
+--  Every sheet an icon needs is recorded when the icon is created. Icons.Preload downloads exactly those
+--  sheets with ContentProvider (real per-asset progress), then draws each one once off screen so the texture
+--  is on the GPU before the interface is shown: no blurry first frames, no pop-in.
+Icons.Quality = "High"
+Icons.Used    = {}                                   -- image url -> true (sheets something has asked for)
+Icons.Loaded  = {}                                   -- image url -> true (downloaded and warmed up)
+Icons.Failed  = {}
+Icons.Live    = setmetatable({}, { __mode = "k" })   -- ImageLabel -> { icon, px, color } so quality changes can re-apply
+
+-- The icons the library itself draws (Icons.Preload / the loader always load these first)
+Icons.Core = {
+	"activity","bar-chart-3","bell","bell-ring","box","check","chevron-down","chevron-right","chevrons-right","circle","circle-check",
+	"circle-user-round","circle-x","clipboard-copy","clock","cloud","code-xml","coins","contrast","copy","crown","download","eye","file-text",
+	"filter","folder","folder-open","frame","gauge","git-commit-horizontal","heart","home","info","key-round","keyboard","layers","layers-2",
+	"layout-dashboard","layout-grid","layout-list","link","list","loader-circle","lock","maximize","maximize-2","memory-stick","minimize",
+	"minimize-2","minus","monitor","moon","mouse-pointer-click","move","move-diagonal-2","move-horizontal","paintbrush","palette","pencil","plus",
+	"power","refresh-cw","repeat","rotate-ccw","rotate-cw","rows-3","ruler","save","scaling","scan-eye","scan-line","search","settings",
+	"settings-2","share-2","sliders-horizontal","sparkles","spline","square-check","sun-moon","table","text","timer","toggle-right","trash-2",
+	"triangle-alert","type","user-circle-2","users","wand-sparkles","wifi","x","zap",
+}
+
+local function sizeFor(px)
+	local q = Icons.Quality
+	if q == "Standard" or q == "Fast" then return (px and px > 48) and 256 or 48 end
+	if q == "Auto" then return (px and px > 28) and 256 or 48 end
+	return 256
+end
+
+--- Every sheet url a list of icon names needs (in the current quality)
+function Icons.SheetsFor(names, px)
+	local out, seen = {}, {}
+	for _, name in names do
+		local entry = parseIcons(sizeFor(px))[cleanName(name)]
+		if entry then
+			local url = "rbxassetid://" .. ICON_DATA[sizeFor(px)].sheets[entry[1]]
+			if not seen[url] then seen[url] = true; table.insert(out, url) end
+		end
+	end
+	return out
+end
+
+--- How many sheets are still waiting to be downloaded (for everything that was drawn so far plus `names`)
+function Icons.Pending(names, px)
+	local n = 0
+	for url in Icons.Used do if not Icons.Loaded[url] then n += 1 end end
+	if names then
+		for _, url in Icons.SheetsFor(names, px) do
+			if not Icons.Used[url] and not Icons.Loaded[url] then n += 1 end
+		end
+	end
+	return n
+end
+
+--- Download (and warm up) every sheet that was used, plus anything in o.Names / o.Urls.
+--- Yields until done. o = { Names = {icon names}, Urls = {extra image urls}, OnProgress = function(done, total, label), Warm = true, Timeout = 25 }
+--- Returns done, total.
+function Icons.Preload(o)
+	o = o or {}
+	local list, seen = {}, {}
+	local function add(url)
+		if type(url) == "string" and url ~= "" and not seen[url] and not Icons.Loaded[url] then
+			seen[url] = true
+			table.insert(list, url)
+		end
+	end
+	for url in Icons.Used do add(url) end
+	if o.Names then for _, url in Icons.SheetsFor(o.Names, o.Px or 18) do Icons.Used[url] = true; add(url) end end
+	if o.Urls then for _, url in o.Urls do add(url) end end
+
+	local total, done = #list, 0
+	local function report(label)
+		if o.OnProgress then pcall(o.OnProgress, done, total, label) end
+	end
+	report("icons")
+	if total == 0 then return 0, 0 end
+
+	local CP = Service("ContentProvider")
+	local finished = false
+	local started = os.clock()
+	task.spawn(function()
+		local ok = false
+		if CP then
+			ok = pcall(function()
+				CP:PreloadAsync(list, function(url, status)
+					done += 1
+					if status == Enum.AssetFetchStatus.Success or status == nil then
+						Icons.Loaded[url] = true
+					else
+						Icons.Failed[url] = true
+						Icons.Loaded[url] = true   -- nothing more to wait for; the engine keeps retrying on its own
+					end
+					report("icons")
+				end)
+			end)
+		end
+		if not ok then
+			-- no ContentProvider: probe the images directly
+			for _, url in list do
+				local probe = New("ImageLabel", { Size = UDim2.fromOffset(1, 1), Position = UDim2.fromOffset(-10, -10), Image = url, ImageTransparency = 0.99 })
+				local t0 = os.clock()
+				while not probe.IsLoaded and os.clock() - t0 < 4 do task.wait(0.05) end
+				probe:Destroy()
+				Icons.Loaded[url] = true
+				done += 1
+				report("icons")
+			end
+		end
+		finished = true
+	end)
+	while not finished and os.clock() - started < (o.Timeout or 25) do task.wait(0.03) end
+	for _, url in list do Icons.Loaded[url] = true end
+	done = total
+	report("icons")
+	return done, total
+end
+
+--- Draw every loaded sheet once, off screen but visible, for a couple of frames, so each texture is uploaded
+--- at full size before the interface appears. `parent` is any GuiObject that is on screen.
+function Icons.Warm(parent, urls)
+	if not parent or not parent.Parent then return end
+	local holder = New("Frame", { Name = "IconWarmup", BackgroundTransparency = 1, Size = UDim2.fromOffset(2, 2), Position = UDim2.fromOffset(0, 0), ClipsDescendants = true, Parent = parent })
+	local list = {}
+	if urls then for _, url in urls do table.insert(list, url) end else for url in Icons.Used do table.insert(list, url) end end
+	for _, url in list do
+		New("ImageLabel", { Size = UDim2.fromOffset(64, 64), Image = url, ImageTransparency = 0.995, Parent = holder })
+	end
+	task.wait(0.05)
+	pcall(function() RunService.RenderStepped:Wait() end)
+	pcall(function() RunService.RenderStepped:Wait() end)
+	holder:Destroy()
+end
+
+--- Change the quality at runtime ("High" | "Auto" | "Standard"). Every live icon is re-applied; new sheets download first.
+function Icons.SetQuality(q, onProgress)
+	if q == "Fast" then q = "Standard" end
+	if q ~= "High" and q ~= "Auto" and q ~= "Standard" then return false end
+	if Icons.Quality == q then return true end
+	Icons.Quality = q
+	local imgs = {}
+	for img, info in Icons.Live do if img.Parent then table.insert(imgs, { img, info }) end end
+	task.spawn(function()
+		local names = {}
+		for _, pair in imgs do if type(pair[2][1]) == "string" then table.insert(names, pair[2][1]) end end
+		Icons.Preload({ Names = names, OnProgress = onProgress })
+		for _, pair in imgs do
+			local img, info = pair[1], pair[2]
+			if img.Parent then Icons.Apply(img, info[1], info[2], info[3]) end
+		end
+	end)
+	return true
+end
+
+function Icons.GetQuality() return Icons.Quality end
 
 --- Sorted array of every built-in icon name
 function Icons.GetNames()
@@ -1187,7 +1728,7 @@ function Icons.Resolve(icon, px)
 		end
 	end
 	local name = cleanName(icon)
-	local size = (px and px > 48) and 256 or 48
+	local size = sizeFor(px)
 	local entry = parseIcons(size)[name]
 	if not entry then
 		if not iconWarned[name] then
@@ -1196,8 +1737,10 @@ function Icons.Resolve(icon, px)
 		end
 		return nil
 	end
+	local url = "rbxassetid://" .. ICON_DATA[size].sheets[entry[1]]
+	Icons.Used[url] = true
 	return {
-		Image = "rbxassetid://" .. ICON_DATA[size].sheets[entry[1]],
+		Image = url,
 		RectSize = Vector2.new(size, size),
 		RectOffset = Vector2.new(entry[2], entry[3]),
 		Lucide = true,
@@ -1206,6 +1749,7 @@ end
 
 --- Apply an icon to an ImageLabel / ImageButton. `color` is a theme token or Color3 (Lucide icons are tinted).
 function Icons.Apply(img, icon, px, color)
+	Icons.Live[img] = { icon, px, color }
 	local data = Icons.Resolve(icon, px)
 	if not data then
 		img.Image = ""
@@ -1303,8 +1847,13 @@ end
 --  effect is destroyed by the time it has faded out.
 -- ─────────────────────────────────────────────────────────────
 Fx.Enabled = true
-Fx.Style   = "Ripple"                                  -- Ripple | Burst | Pulse | Sheen | None
-Fx.Styles  = { "Ripple", "Burst", "Pulse", "Sheen", "None" }
+Fx.IconPop = false
+Fx.Style   = "Ink"                                     -- the default for every category without its own
+Fx.Styles  = { "Ink", "Trace", "Spark", "Pixels", "Focus", "Sonar", "None" }
+Fx.Targets = { "Buttons", "Tabs", "Elements", "WindowButtons", "Popups", "Background" }
+Fx.Config  = {                                         -- true = the default style, false = nothing, or a style / function / table
+	Buttons = true, Tabs = true, Elements = true, WindowButtons = true, Popups = true, Background = false,
+}
 
 local function cornerOf(inst)
 	local c = inst:FindFirstChildOfClass("UICorner")
@@ -1367,19 +1916,18 @@ function Fx.Host(target, o)
 	local clip = New(class, { Name = "FxClip", BackgroundTransparency = 1, ZIndex = 0, Active = false })
 	if rounded then New("UICorner", { CornerRadius = radius, Parent = clip }) end
 
-	if not auto and not layout then
+	if not layout and not (auto and pad) then
+		-- ALWAYS scale-sized: a scale size on an auto-sized axis is ignored by AutomaticSize, so the
+		-- effect container can never make its target taller (a pixel size here used to).
 		clip.Size = UDim2.fromScale(1, 1)
-		if pad then
+		if pad and not auto then
 			local l, t = pad.PaddingLeft.Offset, pad.PaddingTop.Offset
 			clip.Position = UDim2.fromOffset(-l, -t)
 			clip.Size = UDim2.new(1, l + pad.PaddingRight.Offset, 1, t + pad.PaddingBottom.Offset)
 		end
 		clip.Parent = target
-	elseif auto and not layout and not pad then
-		local scale = Util.GetScale(target)
-		clip.Size = UDim2.fromOffset(target.AbsoluteSize.X / scale, target.AbsoluteSize.Y / scale)
-		clip.Parent = target
 	else
+		-- layout owners / padded auto frames: float from the gui root, completely outside any layout
 		local gui = target:FindFirstAncestorOfClass("ScreenGui")
 		local root = gui and gui:FindFirstChild("Root")
 		if not root then clip:Destroy(); return nil end
@@ -1400,38 +1948,6 @@ end
 
 local function cleanup(inst, after)
 	task.delay(after, function() if inst then inst:Destroy() end end)
-end
-
---- Expanding circle + ring from the click point. o = { Color, Alpha, Duration, Radius, X, Y, Ring, Reach }
---- The circle is capped (it never floods a whole wide row), starts soft and fades while it grows.
-function Fx.Ripple(target, o)
-	if not Fx.Enabled or not target or not target.Parent then return end
-	o = o or {}
-	local x, y, w, h = pointerIn(target)
-	if o.X then x, y = o.X, o.Y or y end
-	local color = fxColor(o.Color)
-	local dur = o.Duration or 0.55
-	local clip = Fx.Host(target, { Radius = o.Radius })
-	if not clip then return end
-	local reach = math.min(math.sqrt(math.max(x, w - x) ^ 2 + math.max(y, h - y) ^ 2) * 2 + 6, o.Reach or 170)
-
-	local blob = fullCircle(clip, {
-		AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(0, 0),
-		BackgroundColor3 = color, BackgroundTransparency = o.Alpha or 0.84,
-	})
-	Util.Tween(blob, dur * 0.95, { Size = UDim2.fromOffset(reach, reach) }, "Out")
-	Util.Tween(blob, dur, { BackgroundTransparency = 1 }, "Quad")
-
-	if o.Ring ~= false then
-		local ring = fullCircle(clip, {
-			AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(6, 6),
-			BackgroundTransparency = 1,
-		})
-		local st = New("UIStroke", { Thickness = 1.5, Color = color, Transparency = 0.3, Parent = ring })
-		Util.Tween(ring, dur * 0.8, { Size = UDim2.fromOffset(reach * 0.7, reach * 0.7) }, "Out")
-		Util.Tween(st, dur * 0.8, { Transparency = 1 }, "Quad")
-	end
-	cleanup(clip, dur + 0.1)
 end
 
 --- Particles flying out of a point. o = { Parent, X, Y, Color, Count, Distance, Size, Duration, ZIndex }
@@ -1480,62 +1996,292 @@ function Fx.Flash(target, o)
 	cleanup(clip, dur + 0.05)
 end
 
---- Diagonal light sweep across a surface. o = { Color, Alpha, Duration, Radius }
+--- Soft highlight used for "look here" moments (kept under its old name; it no longer sweeps a line)
 function Fx.Sheen(target, o)
-	if not Fx.Enabled or not target or not target.Parent then return end
 	o = o or {}
+	Fx.Flash(target, { Color = o.Color, Alpha = math.min((o.Alpha or 0.8) + 0.08, 0.95), Duration = (o.Duration or 0.6) + 0.1, Radius = o.Radius })
+end
+
+-- ─────────────────────────────────────────────────────────────
+--  Click effects
+--  Six built-in effects, each one a different idea (not a colour variation of the same one):
+--    Ink     a flat disc bleeds out from the pointer and dries
+--    Trace   a comet of light runs once around the border
+--    Spark   short hairline ticks fly away from the pointer
+--    Pixels  a loose lattice of square pixels flickers out around the pointer
+--    Focus   four corner brackets snap onto the element
+--    Sonar   two thin outline rings travel outwards (no fill)
+--  They are configured per kind of control (Fx.Config), see Vesper:SetEffects.
+--  Custom effects: Vesper:RegisterEffect(name, function(ctx) ... end).
+-- ─────────────────────────────────────────────────────────────
+local function radiusPx(radius, w, h)
+	return radius.Scale * math.min(w, h) + radius.Offset
+end
+
+Fx.Effects = {}
+
+--- Ink: one flat disc, grows from the pointer and dries out. o = { Color, Alpha, Duration, Reach, X, Y, Radius }
+function Fx.Effects.Ink(target, o)
+	local x, y, w, h = pointerIn(target)
+	if o.X then x, y = o.X, o.Y or y end
 	local clip = Fx.Host(target, { Radius = o.Radius })
 	if not clip then return end
-	local bar = New("Frame", {
-		AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(-0.25, 0, 0.5, 0), Size = UDim2.new(0.3, 0, 3, 0),
-		Rotation = 16, BackgroundColor3 = fxColor(o.Color or WHITE), Parent = clip,
+	local dur = o.Duration or 0.62
+	local reach = math.min(math.sqrt(math.max(x, w - x) ^ 2 + math.max(y, h - y) ^ 2) * 2 + 4, o.Reach or 560)
+	local blob = fullCircle(clip, {
+		AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(0, 0),
+		BackgroundColor3 = fxColor(o.Color), BackgroundTransparency = o.Alpha or 0.8,
 	})
-	New("UIGradient", {
-		Transparency = NumberSequence.new({ kp(0, 1), kp(0.5, o.Alpha or 0.8), kp(1, 1) }), Parent = bar,
+	Util.Tween(blob, dur * 0.8, { Size = UDim2.fromOffset(reach, reach) }, "Out")
+	Util.Tween(blob, dur, { BackgroundTransparency = 1 }, "Quad")
+	cleanup(clip, dur + 0.1)
+end
+
+--- Trace: a comet of light runs one lap around the border. o = { Color, Duration, Thickness, Radius }
+local TRACE_SEQ = NumberSequence.new({ kp(0, 1), kp(0.5, 1), kp(0.82, 0.25), kp(0.95, 0), kp(0.951, 1), kp(1, 1) })
+function Fx.Effects.Trace(target, o)
+	local _, _, w, h = pointerIn(target)
+	local clip = Fx.Host(target, { Clip = false, Radius = o.Radius })
+	if not clip then return end
+	local th = o.Thickness or 1.5
+	local radius = o.Radius or cornerOf(target)
+	local ring = New("Frame", {
+		Position = UDim2.fromOffset(th, th), Size = UDim2.new(1, -th * 2, 1, -th * 2), BackgroundTransparency = 1, Parent = clip,
 	})
+	New("UICorner", { CornerRadius = UDim.new(0, math.max(radiusPx(radius, w, h) - th, 0)), Parent = ring })
+	local st = New("UIStroke", { Thickness = th, Color = fxColor(o.Color), Transparency = 0, Parent = ring })
+	local g = New("UIGradient", { Transparency = TRACE_SEQ, Rotation = 0, Parent = st })
 	local dur = o.Duration or 0.7
-	Util.Tween(bar, dur, { Position = UDim2.new(1.25, 0, 0.5, 0) }, "Sine")
-	cleanup(clip, dur + 0.05)
+	Util.Tween(g, dur, { Rotation = 360 }, "Sine")
+	Util.Tween(st, dur, { Transparency = 1 }, "In")
+	cleanup(clip, dur + 0.1)
 end
 
---- The click effect used by every control (change it with Vesper:SetClickEffect)
---- o = { Color, Radius, Style }. It also lights the target's corner stroke for a moment.
-function Fx.Click(target, o)
-	if not Fx.Enabled then return end
-	o = o or {}
-	local edge = target and Util.Part(target, "Edge")
-	if edge then Edge.Pulse(edge) end
-	local style = o.Style or Fx.Style
-	if style == "None" then return end
-	if style == "Burst" then
-		Fx.Ripple(target, { Color = o.Color, Radius = o.Radius, Alpha = 0.88, Ring = false, Duration = 0.5 })
-		Fx.Burst(target, { Color = o.Color, Count = 6, Distance = 22, Size = 3.5 })
-	elseif style == "Pulse" then
-		Fx.Flash(target, { Color = o.Color, Radius = o.Radius, Alpha = 0.88, Duration = 0.5 })
-		Fx.Ripple(target, { Color = o.Color, Radius = o.Radius, Alpha = 1, Duration = 0.55 })
-	elseif style == "Sheen" then
-		Fx.Sheen(target, { Color = o.Sheen or WHITE, Radius = o.Radius, Alpha = 0.75, Duration = 0.55 })
-		Fx.Ripple(target, { Color = o.Color, Radius = o.Radius, Alpha = 0.92, Ring = false, Duration = 0.5 })
-	else
-		Fx.Ripple(target, { Color = o.Color, Radius = o.Radius })
+--- Spark: hairline ticks fly out from the pointer. o = { Color, Color2, Count, Distance, Duration, X, Y }
+function Fx.Effects.Spark(target, o)
+	local x, y = pointerIn(target)
+	if o.X then x, y = o.X, o.Y or y end
+	local clip = Fx.Host(target, { Clip = false, Radius = o.Radius })
+	if not clip then return end
+	local a, b = fxColor(o.Color), fxColor(o.Color2 or o.Color)
+	local count, dist, dur = o.Count or 8, o.Distance or 22, o.Duration or 0.5
+	local seed = math.random() * math.pi
+	for i = 1, count do
+		local ang = seed + (i / count) * math.pi * 2
+		local r0, r1 = 5, dist * (0.8 + math.random() * 0.4)
+		local len = 7 + math.random() * 4
+		local tick = New("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(x + math.cos(ang) * r0, y + math.sin(ang) * r0),
+			Size = UDim2.fromOffset(1.5, len), Rotation = math.deg(ang) - 90, BackgroundColor3 = (i % 2 == 0) and b or a,
+			BackgroundTransparency = 0.05, BorderSizePixel = 0, Parent = clip,
+		})
+		Util.Tween(tick, dur, {
+			Position = UDim2.fromOffset(x + math.cos(ang) * r1, y + math.sin(ang) * r1),
+			Size = UDim2.fromOffset(1.5, 1), BackgroundTransparency = 1,
+		}, "Out")
 	end
+	cleanup(clip, dur + 0.1)
 end
 
+--- Pixels: a loose lattice of square pixels flickers on and off around the pointer. o = { Color, Color2, Duration, X, Y }
+function Fx.Effects.Pixels(target, o)
+	local x, y = pointerIn(target)
+	if o.X then x, y = o.X, o.Y or y end
+	local clip = Fx.Host(target, { Clip = false, Radius = o.Radius })
+	if not clip then return end
+	local a, b = fxColor(o.Color), fxColor(o.Color2 or o.Color)
+	local cols, rows, gap, size = 7, 3, 7, 3
+	local dur = o.Duration or 0.55
+	for cx = 1, cols do
+		for cy = 1, rows do
+			if math.random() > 0.3 then
+				local px = x + (cx - (cols + 1) / 2) * gap
+				local py = y + (cy - (rows + 1) / 2) * gap
+				local sq = New("Frame", {
+					AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(px, py), Size = UDim2.fromOffset(size, size),
+					BackgroundColor3 = ((cx + cy) % 2 == 0) and a or b, BackgroundTransparency = 1, BorderSizePixel = 0, Parent = clip,
+				})
+				task.delay(math.random() * dur * 0.35, function()
+					if not sq.Parent then return end
+					local on = Util.Tween(sq, 0.06, { BackgroundTransparency = 0.05 }, "Quad")
+					local function off()
+						if sq.Parent then
+							Util.Tween(sq, dur * 0.55, { BackgroundTransparency = 1, Position = UDim2.fromOffset(px + (px - x) * 0.25, py - 3) }, "Out")
+						end
+					end
+					if on then on.Completed:Connect(off) else off() end
+				end)
+			end
+		end
+	end
+	cleanup(clip, dur + 0.35)
+end
+
+--- Focus: four corner brackets snap onto the element and fade. o = { Color, Duration, Length, Radius }
+function Fx.Effects.Focus(target, o)
+	local _, _, w, h = pointerIn(target)
+	local clip = Fx.Host(target, { Clip = false, Radius = o.Radius })
+	if not clip then return end
+	local color = fxColor(o.Color)
+	local len, th = o.Length or 9, 1.5
+	local to = math.max(radiusPx(o.Radius or cornerOf(target), w, h) * 0.42, 4)
+	local from = to + 7
+	local dur = o.Duration or 0.5
+	for cx = 0, 1 do
+		for cy = 0, 1 do
+			local sx, sy = cx == 0 and 1 or -1, cy == 0 and 1 or -1
+			for _, horizontal in { true, false } do
+				local bar = New("Frame", {
+					AnchorPoint = Vector2.new(cx, cy), Position = UDim2.new(cx, from * sx, cy, from * sy),
+					Size = horizontal and UDim2.fromOffset(len, th) or UDim2.fromOffset(th, len),
+					BackgroundColor3 = color, BackgroundTransparency = 0.1, BorderSizePixel = 0, Parent = clip,
+				})
+				Util.Tween(bar, dur * 0.55, { Position = UDim2.new(cx, to * sx, cy, to * sy) }, "Out")
+				Util.Tween(bar, dur, { BackgroundTransparency = 1 }, "In")
+			end
+		end
+	end
+	cleanup(clip, dur + 0.1)
+end
+
+--- Sonar: two thin outline rings travel outwards, no fill. o = { Color, Duration, Reach, X, Y }
+function Fx.Effects.Sonar(target, o)
+	local x, y, w, h = pointerIn(target)
+	if o.X then x, y = o.X, o.Y or y end
+	local clip = Fx.Host(target, { Radius = o.Radius })
+	if not clip then return end
+	local color = fxColor(o.Color)
+	local dur = o.Duration or 0.7
+	local reach = math.min(math.sqrt(math.max(x, w - x) ^ 2 + math.max(y, h - y) ^ 2) * 1.8 + 8, o.Reach or 300)
+	for i = 1, 2 do
+		local ring = fullCircle(clip, {
+			AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(4, 4), BackgroundTransparency = 1, Visible = i == 1,
+		})
+		local st = New("UIStroke", { Thickness = 1.25, Color = color, Transparency = 0.2, Parent = ring })
+		local function go()
+			if not ring.Parent then return end
+			ring.Visible = true
+			Util.Tween(ring, dur * 0.85, { Size = UDim2.fromOffset(reach * (i == 1 and 1 or 0.78), reach * (i == 1 and 1 or 0.78)) }, "Out")
+			Util.Tween(st, dur * 0.85, { Transparency = 1 }, "Quad")
+		end
+		if i == 1 then go() else task.delay(0.12, go) end
+	end
+	cleanup(clip, dur + 0.25)
+end
+
+-- legacy names
+Fx.Aliases = { Ripple = "Ink", Burst = "Spark", Pulse = "Sonar", Sheen = "Trace", Flash = "Ink", Pixel = "Pixels" }
+function Fx.Ripple(target, o)
+	if not Fx.Enabled or not target or not target.Parent then return end
+	Fx.Effects.Ink(target, o or {})
+end
+
+--- Run a user effect. ctx = { Target, Host, X, Y, W, H, Color, Color2, Radius, Duration }.
+--- Draw into ctx.Host (it is clipped to the target and destroyed for you); return a duration in seconds if
+--- the effect takes longer than a second.
+function Fx.RunCustom(fn, target, o)
+	local x, y, w, h = pointerIn(target)
+	if o.X then x, y = o.X, o.Y or y end
+	local host = Fx.Host(target, { Radius = o.Radius })
+	if not host then return end
+	local ctx = {
+		Target = target, Host = host, X = x, Y = y, W = w, H = h,
+		Color = fxColor(o.Color), Color2 = fxColor(o.Color2 or o.Color), Radius = o.Radius or cornerOf(target), Duration = o.Duration or 1,
+	}
+	local ok, res = pcall(fn, ctx)
+	if not ok then warn("[Vesper] custom effect error: " .. tostring(res)) end
+	cleanup(host, (tonumber(ok and res) or ctx.Duration) + 0.1)
+end
+
+Fx.Custom = {}
+
+--- Resolve what a category currently plays: a style name, a function, a table, or nil for nothing
+function Fx.Resolve(category)
+	local cfg = Fx.Config[category or "Buttons"]
+	if cfg == nil or cfg == true then cfg = Fx.Style end
+	if cfg == false or cfg == "None" then return nil end
+	return cfg
+end
+
+local function mergeOpts(base, extra)
+	local out = {}
+	for k, v in base do out[k] = v end
+	for k, v in extra do if k ~= "Style" then out[k] = v end end
+	return out
+end
+
+--- Play an effect by name / function / { Style, ... } on a target
+function Fx.Run(style, target, o)
+	o = o or {}
+	if type(style) == "table" then
+		o = mergeOpts(o, style)
+		style = style.Style or Fx.Style
+	end
+	if type(style) == "function" then return Fx.RunCustom(style, target, o) end
+	if style == nil or style == false or style == "None" then return end
+	style = Fx.Aliases[style] or style
+	local builtin = Fx.Effects[style]
+	if builtin then return builtin(target, o) end
+	local custom = Fx.Custom[style]
+	if custom then return Fx.RunCustom(custom, target, o) end
+	return Fx.Effects[Fx.Style] and Fx.Effects[Fx.Style](target, o)
+end
+
+--- The click effect used by every control.
+--- o = { Category = "Buttons" | "Tabs" | "Elements" | "WindowButtons" | "Popups" | "Background", Color, Radius, Style }
+--- The category decides whether anything plays at all (Vesper:SetEffects). The corner stroke only lights up when it does.
+function Fx.Click(target, o)
+	if not Fx.Enabled or not target or not target.Parent then return end
+	o = o or {}
+	local style = o.Style or Fx.Resolve(o.Category)
+	if not style then return end
+	local edge = Util.Part(target, "Edge")
+	if edge and o.Category ~= "Background" then Edge.Pulse(edge) end
+	Fx.Run(style, target, o)
+end
+
+local function isStyleName(name)
+	if type(name) ~= "string" then return false end
+	return Fx.Effects[Fx.Aliases[name] or name] ~= nil or Fx.Custom[name] ~= nil or name == "None"
+end
+
+--- The default style used by every category that does not have its own
 function Fx.SetStyle(style)
+	if style == false then style = "None" end
 	if type(style) ~= "string" then return false end
 	for _, s in Fx.Styles do
 		if string.lower(s) == string.lower(style) then Fx.Style = s; return true end
 	end
+	local alias = Fx.Aliases[style]
+	if alias then Fx.Style = alias; return true end
+	if Fx.Custom[style] then Fx.Style = style; return true end
 	return false
 end
 
---- Small wiggle used on icons when their control is pressed
+--- Fx.SetEffect("Tabs", "Trace") | ("Buttons", false) | ("Popups", function(ctx) ... end) | ("Background", { Style = "Sonar", Color = "Accent2" })
+function Fx.SetEffect(category, value)
+	if not table.find(Fx.Targets, category) then return false end
+	if value == nil then value = true end
+	if type(value) == "string" and not isStyleName(value) then return false end
+	Fx.Config[category] = value
+	return true
+end
+
+--- Vesper:RegisterEffect(name, function(ctx)) – the name then works everywhere a style name does
+function Fx.Register(name, fn)
+	if type(name) ~= "string" or type(fn) ~= "function" then return false end
+	Fx.Custom[name] = fn
+	if not table.find(Fx.Styles, name) then table.insert(Fx.Styles, #Fx.Styles, name) end
+	return true
+end
+
+--- Icon wiggle on press. Off by default (a wiggling icon reads as toy-like); Vesper:SetEffects({ IconPop = true }) turns it on.
 function Fx.Pop(img, deg)
-	if not img or not img.Parent then return end
+	if not Fx.IconPop or not img or not img.Parent then return end
 	img.Rotation = 0
-	Util.Tween(img, 0.1, { Rotation = deg or 14 }, "Quad")
+	Util.Tween(img, 0.1, { Rotation = (deg or 10) * 0.6 }, "Quad")
 	task.delay(0.1, function()
-		if img and img.Parent then Util.Tween(img, 0.45, { Rotation = 0 }, "Elastic") end
+		if img and img.Parent then Util.Tween(img, 0.3, { Rotation = 0 }, "Out") end
 	end)
 end
 
@@ -2073,8 +2819,6 @@ function Util.MakeButton(o)
 		Util.Shade(btn, 90, 0.09)
 		Edge.Attach(btn, "Button", { Radius = radius, Alpha = 0.55, Inset = 6, ShadowAlpha = 0.8, ZIndex = 4 })
 	end
-	Util.PressScale(btn, btn, 0.965)
-
 	if normal then
 		Theme.Bind(btn, { BackgroundColor3 = normal })
 		Util.HoverFx(btn, btn, normal, hover, press)
@@ -2085,7 +2829,6 @@ function Util.MakeButton(o)
 	else
 		btn.MouseEnter:Connect(function()
 			Util.Tween(btn, 0.14, { BackgroundColor3 = Color3.new(0.9, 0.9, 0.9) }, "Quad")
-			Fx.Sheen(btn, { Radius = UDim.new(0, radius), Alpha = 0.78, Duration = 0.6 })
 		end)
 		btn.MouseLeave:Connect(function() Util.Tween(btn, 0.14, { BackgroundColor3 = WHITE }, "Quad") end)
 		btn.MouseButton1Down:Connect(function() Util.Tween(btn, 0.08, { BackgroundColor3 = Color3.new(0.76, 0.76, 0.76) }, "Quad") end)
@@ -2113,7 +2856,7 @@ function Util.MakeButton(o)
 
 	btn.Activated:Connect(function()
 		Sound.Play("Click")
-		Fx.Click(btn, { Color = fxColor, Radius = UDim.new(0, radius) })
+		Fx.Click(btn, { Color = fxColor, Radius = UDim.new(0, radius), Category = o.Category or "Buttons" })
 		Fx.Pop(Util.Part(btn, "Icon"))
 		Util.Fire(o.Callback)
 	end)
@@ -2166,9 +2909,10 @@ function Util.OpenPopover(host, overlay, anchor, opts)
 		closed = true
 		if host._popover == object then host._popover = nil end
 		blocker:Destroy()
-		Util.FadeCanvas(canvas, 1, 0.14, "Quad")
-		Util.Tween(pop, 0.16, { Scale = 0.96 }, "Quad")
-		task.delay(0.2, function() holder:Destroy() end)
+		local tw = Util.FadeCanvas(canvas, 1, 0.14, "Quad")
+		Util.Tween(pop, 0.14, { Scale = 0.96 }, "Quad")
+		holder.Active = false
+		Util.OnDone(tw, 0.14, function() holder:Destroy() end)
 		if opts.OnClose then Util.Fire(opts.OnClose) end
 	end
 	blocker.Activated:Connect(object.Close)
@@ -2235,11 +2979,12 @@ function Util.Dialog(parent, opts)
 	function object.Close()
 		if closed then return end
 		closed = true
-		Util.Tween(backdrop, 0.18, { BackgroundTransparency = 1 }, "Quad")
-		Util.FadeCanvas(card, 1, 0.16, "Quad")
-		Util.Tween(scale, 0.16, { Scale = 0.95 }, "Quad")
+		Util.Tween(backdrop, 0.16, { BackgroundTransparency = 1 }, "Quad")
+		local tw = Util.FadeCanvas(card, 1, 0.16, "Quad")
+		Util.Tween(scale, 0.16, { Scale = 0.96 }, "Quad")
 		Sound.Play("Close")
-		task.delay(0.22, function() backdrop:Destroy(); holder:Destroy() end)
+		backdrop.Active = false
+		Util.OnDone(tw, 0.16, function() backdrop:Destroy(); holder:Destroy() end)
 	end
 
 	local buttons = opts.Buttons
@@ -2250,7 +2995,7 @@ function Util.Dialog(parent, opts)
 		for i, def in buttons do
 			Util.MakeButton({
 				Parent = row, Text = def.Title or "OK", Variant = def.Variant or (i == #buttons and "Primary" or "Secondary"),
-				Icon = def.Icon, LayoutOrder = i, Height = 34,
+				Icon = def.Icon, LayoutOrder = i, Height = 34, Category = "Popups",
 				Callback = function()
 					Util.Fire(def.Callback)
 					if def.Close ~= false then object.Close() end
@@ -2422,23 +3167,22 @@ function Vesper:Notify(opts)
 		local idx = table.find(Layer.Active, object)
 		if idx then table.remove(Layer.Active, idx) end
 		if opts.OnClose then Util.Fire(opts.OnClose) end
-		Util.FadeCanvas(card, 1, 0.22, "In")
+		local tw = Util.FadeCanvas(card, 1, 0.22, "In")
 		if animation == "Pop" then
-			Util.Tween(pop, 0.22, { Scale = 0.9 }, "In")
+			Util.Tween(pop, 0.22, { Scale = 0.94 }, "In")
 		elseif animation == "Drop" then
 			Util.Tween(surface, 0.22, { Position = UDim2.fromScale(0, fromBottom and 0.25 or -0.25) }, "In")
 		elseif animation == "Slide" then
 			Util.Tween(surface, 0.22, { Position = UDim2.fromOffset(side * 50, 0) }, "In")
 		end
-		task.delay(0.2, function()
+		Util.OnDone(tw, 0.22, function()
 			if not holder.Parent then return end
 			local scale = Layer.Host and Layer.Host:GetScale() or 1
 			local h = holder.AbsoluteSize.Y / scale
 			holder.AutomaticSize = Enum.AutomaticSize.None
 			holder.Size = UDim2.new(0, width, 0, h)
 			holder.ClipsDescendants = true
-			Util.Tween(holder, 0.22, { Size = UDim2.new(0, width, 0, 0) }, "Quad")
-			task.delay(0.24, function() holder:Destroy() end)
+			Util.OnDone(Util.Tween(holder, 0.2, { Size = UDim2.new(0, width, 0, 0) }, "Quad"), 0.2, function() holder:Destroy() end)
 		end)
 	end
 	function object:SetTitle(text) Util.SetText(title, text) end
@@ -2457,7 +3201,7 @@ function Vesper:Notify(opts)
 		for i, def in opts.Buttons do
 			Util.MakeButton({
 				Parent = row, Text = def.Title, Icon = def.Icon, Variant = def.Variant or (i == #opts.Buttons and "Primary" or "Secondary"),
-				Height = compact and 24 or 28, LayoutOrder = i, TextSize = 12, Radius = 8,
+				Height = compact and 24 or 28, LayoutOrder = i, TextSize = 12, Radius = 8, Category = "Popups",
 				Callback = function() Util.Fire(def.Callback); if def.Close ~= false then object:Close() end end,
 			})
 		end
@@ -2607,7 +3351,7 @@ local function iconButton(parent, icon, size, order, filled)
 	end)
 	btn.MouseButton1Down:Connect(function() Util.Tween(img, 0.08, { Size = UDim2.fromOffset(13, 13) }, "Quad") end)
 	btn.MouseButton1Up:Connect(function() Util.Tween(img, 0.2, { Size = UDim2.fromOffset(16, 16) }, "Back") end)
-	btn.Activated:Connect(function() Fx.Click(btn, { Radius = UDim.new(0, 9) }) end)
+	btn.Activated:Connect(function() Fx.Click(btn, { Radius = UDim.new(0, 9), Category = "WindowButtons" }) end)
 	Util.SetPart(btn, "Image", img)
 	return btn
 end
@@ -2670,15 +3414,14 @@ function Vesper:CreateWindow(opts)
 	if opts.Sounds ~= nil then Sound.Enabled = opts.Sounds end
 	if opts.Localization then Vesper:Localization(opts.Localization) end
 	Layer.Init()
-	-- Mode is independent from the theme: every theme has a Dark and a Light version.
-	-- (themes that used to be light-only still open light when no Mode is given)
-	if opts.Theme and Theme.Specs[opts.Theme] and opts.Mode == nil and not Theme.ModeExplicit
-		and Theme.Specs[opts.Theme].Spec.Mode == "Light" then
-		Theme.SetMode("Light", true)
-		Theme.ModeExplicit = false
-	end
-	if opts.Mode then Theme.SetMode(opts.Mode, true) end
+	-- Theme -> Holiday -> Mode. Every theme belongs to a mode (Vesper is dark, its twin Lilac Haze is light);
+	-- `Mode` swaps the chosen theme for its twin. `Holiday = "Auto"` (or Vesper:SetHolidayAuto(true)) opens with
+	-- today's holiday theme when there is one, `Holiday = "Halloween"` forces one, `Holiday = false` never does.
 	if opts.Theme and Theme.Themes[opts.Theme] then Theme.Set(opts.Theme, true) end
+	local holiday = opts.Holiday
+	if holiday == nil and Theme.HolidayAuto then holiday = "Auto" end
+	if holiday then Theme.ApplyHoliday(holiday, true) end
+	if opts.Mode then Theme.SetMode(opts.Mode, true) end
 	if opts.Background then Theme.SetStyle(opts.Background) end
 	if type(opts.Edge) == "table" then Edge.Set(opts.Edge) elseif type(opts.Edge) == "string" then Edge.Set({ Mode = opts.Edge }) end
 
@@ -2739,6 +3482,7 @@ function Vesper:CreateWindow(opts)
 		Name = "Tabs", Position = UDim2.new(0, 0, 0, 66), Size = UDim2.new(1, 0, 1, -66), AutomaticCanvasSize = Enum.AutomaticSize.Y,
 		ScrollingDirection = Enum.ScrollingDirection.Y, Parent = sidebar,
 	})
+	Util.Scroller(self.TabScroll, { Hidden = true })   -- no scroll line in the sidebar, and no over-scroll blank space
 	Util.Padding(self.TabScroll, 6, 10, 10, 10)
 	Util.List(self.TabScroll, 4)
 
@@ -3123,10 +3867,9 @@ function Window:_BuildTabButton(parent, opts, tab, order)
 		end
 		self:_HideTip()
 	end)
-	Util.PressScale(btn, face, 0.97)
 	btn.Activated:Connect(function()
 		Sound.Play("Select")
-		Fx.Click(btn, { Radius = UDim.new(0, 10) })
+		Fx.Click(btn, { Radius = UDim.new(0, 10), Category = "Tabs" })
 		Fx.Pop(tab.Icon, 12)
 		self:_CloseSearch(true)
 		self:SelectTab(tab)
@@ -3148,10 +3891,10 @@ function Window:_NewTab(opts, parent, footer)
 	tab.Page = New("CanvasGroup", { Name = "Page", BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1), Visible = false, GroupTransparency = 1, Parent = self.Pages })
 	tab.Panel = New("ScrollingFrame", {
 		Name = "Panel", Size = UDim2.fromScale(1, 1), BackgroundTransparency = Look.Panel, BackgroundColor3 = WHITE,
-		ScrollBarThickness = 3, ScrollBarImageTransparency = 0.45, AutomaticCanvasSize = Enum.AutomaticSize.Y,
-		ScrollingDirection = Enum.ScrollingDirection.Y, VerticalScrollBarInset = Enum.ScrollBarInset.None, Parent = tab.Page,
+		AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollingDirection = Enum.ScrollingDirection.Y, Parent = tab.Page,
 	})
-	Theme.Bind(tab.Panel, { BackgroundColor3 = "Surface", ScrollBarImageColor3 = "Muted" })
+	Theme.Bind(tab.Panel, { BackgroundColor3 = "Surface" })
+	tab.Scroller = Util.Scroller(tab.Panel, { Parent = tab.Page, Inset = 12, Right = 6 })
 	Util.Corner(tab.Panel, 14)
 	Util.Padding(tab.Panel, 10, 10, 12, 10)
 	tab.PanelList = Util.List(tab.Panel, 8)
@@ -3218,11 +3961,21 @@ function Window:SelectTab(tab, instant)
 	self.SelectedTab = tab
 	if self.Host._popover then self.Host._popover.Close() end
 
+	-- Smooth cross-fade: the old page eases out while the new one eases in with a small rise.
+	-- No sweeping light, no horizontal slide, nothing that crosses the card.
+	self._pageToken = (self._pageToken or 0) + 1
+	local token = self._pageToken
 	if prev then
 		prev:_Paint(false, instant)
 		local page = prev.Page
-		Util.Tween(page, 0.16, { GroupTransparency = 1, Position = UDim2.fromOffset(-18, 0) }, "Quad")
-		task.delay(0.17, function() if self.SelectedTab ~= prev then page.Visible = false end end)
+		if instant then
+			page.Visible = false
+		else
+			Util.Tween(page, 0.14, { GroupTransparency = 1 }, "Quad")
+			task.delay(0.16, function()
+				if self.SelectedTab ~= prev and page.Parent then page.Visible = false end
+			end)
+		end
 	end
 	tab:_Paint(true, instant)
 	local page = tab.Page
@@ -3231,11 +3984,11 @@ function Window:SelectTab(tab, instant)
 		page.GroupTransparency = 0
 		page.Position = UDim2.new()
 	else
-		page.Position = UDim2.fromOffset(26, 0)
-		task.delay(0.1, function()
-			if self.SelectedTab ~= tab then return end
-			Util.Tween(page, 0.42, { GroupTransparency = 0, Position = UDim2.new() }, "Out")
-			Fx.Scan(page)
+		page.GroupTransparency = 1
+		page.Position = UDim2.fromOffset(0, 8)
+		task.delay(0.06, function()
+			if self._pageToken ~= token or not page.Parent then return end
+			Util.Tween(page, 0.3, { GroupTransparency = 0, Position = UDim2.new() }, "Out")
 		end)
 	end
 
@@ -3369,18 +4122,8 @@ end
 -- ─────────────────────────────────────────────────────────────
 local function v2(pos) return Vector2.new(pos.X, pos.Y) end
 
---- One-shot accent line sweeping down a surface (used when a page opens)
-function Fx.Scan(target, o)
-	if not Fx.Enabled or not target or not target.Parent then return end
-	o = o or {}
-	local line = Util.FadeLine(target, {
-		Position = UDim2.new(0, 0, 0, 0), Size = UDim2.new(1, 0, 0, 2), Strength = 0.9, Token = "Accent", ZIndex = 30, Thickness = 2, Style = "Edges",
-	})
-	local dur = o.Duration or 0.5
-	Util.Tween(line, dur, { Position = UDim2.new(0, 0, 1, -2) }, "Quad")
-	Util.Tween(line, dur, { BackgroundTransparency = 1 }, "In")
-	task.delay(dur + 0.05, function() line:Destroy() end)
-end
+--- (the accent line that used to sweep down a page on every tab change is gone; Fx.Scan stays as a no-op for old scripts)
+function Fx.Scan() end
 
 function Window:_SetupInteractions()
 	local host = self.Host
@@ -3530,8 +4273,7 @@ function Window:_UpdateHandle(animate)
 			h.Visible = true
 			Util.FadeCanvas(self.HandleCanvas, 0, 0.35, "Out")
 		else
-			Util.FadeCanvas(self.HandleCanvas, 1, 0.2, "Quad")
-			task.delay(0.22, function() if not self._handleShown then h.Visible = false end end)
+			Util.OnDone(Util.FadeCanvas(self.HandleCanvas, 1, 0.2, "Quad"), 0.2, function() if not self._handleShown then h.Visible = false end end)
 		end
 	end
 end
@@ -3544,13 +4286,15 @@ function Window:SetHandle(enabled)
 end
 
 -- ── Intro ────────────────────────────────────────────────────
---  "Horizon": a glowing line splits open into the window while the logo spins up,
---  the title types itself, and the cover dissolves to reveal the interface.
+--  "Horizon": a branded VESPER UI splash. It really loads the interface behind it (every icon sheet is
+--  downloaded through ContentProvider, then drawn once so nothing shows up blurry), shows the credits,
+--  and only then dissolves to reveal the window.
 --  Intro = false | "None" | "Pop" | "Horizon" | { Style, Duration, Title, Subtitle }
 function Window:_EndIntro()
 	if not self._introPlaying then return end
 	self._introToken = (self._introToken or 0) + 1
 	self._introPlaying = false
+	if self._introBar then self._introBar.Destroy(); self._introBar = nil end
 	if self._introCover then self._introCover:Destroy(); self._introCover = nil end
 	self.Sidebar.Position = UDim2.new()
 	self.Content.Position = UDim2.new(0, self.Collapsed and SIDEBAR_C or SIDEBAR_W, 0, 0)
@@ -3558,33 +4302,59 @@ function Window:_EndIntro()
 	self:_UpdateHandle()
 end
 
+--- Make sure every icon the interface uses is downloaded and on the GPU before anything is shown.
+--- `report(fraction, label, detail)` is optional. Yields.
+function Window:_PrepareIcons(report, warmParent)
+	local pending = Icons.Pending()
+	Icons.Preload({
+		Timeout = 20,
+		OnProgress = function(done, total)
+			if report then report(total == 0 and 1 or done / total, "Loading icons", total == 0 and "" or string.format("%d / %d", done, total)) end
+		end,
+	})
+	if pending > 0 and warmParent and warmParent.Parent then Icons.Warm(warmParent) end
+end
+
 function Window:_PlayIntro()
 	local cfg = self._introCfg
 	self._introDone = true
 	local holder, main = self.Holder, self.Main
+	local token = (self._introToken or 0) + 1
+	self._introToken = token
+	local function alive() return self._introToken == token and not self.Destroyed end
+
+	-- "Pop" / "None": no splash, but the icons are still ready before the window appears
 	if cfg.Style ~= "Horizon" then
-		holder.Visible = true
-		if cfg.Style == "None" then
-			self.Scaler.Scale = 1
-			Util.FadeCanvas(main, self.Opacity, 0.2, "Quad")
-		else
-			Util.FadeCanvas(main, self.Opacity, 0.4, "Out")
-			Util.Tween(self.Scaler, 0.45, { Scale = 1 }, "Back")
-		end
+		task.spawn(function()
+			self._introPlaying = true
+			Util.FadeCanvas(main, 1, 0, nil, true)
+			self:_PrepareIcons(nil, main)
+			self._introPlaying = false
+			if not alive() then return end
+			holder.Visible = true
+			if cfg.Style == "None" then
+				self.Scaler.Scale = 1
+				Util.FadeCanvas(main, self.Opacity, 0.2, "Quad")
+			else
+				self.Scaler.Scale = 0.96
+				Util.FadeCanvas(main, self.Opacity, 0.32, "Out")
+				Util.Tween(self.Scaler, 0.32, { Scale = 1 }, "Out")
+			end
+			self:_UpdateHandle()
+		end)
 		return
 	end
 
-	local token = (self._introToken or 0) + 1
-	self._introToken = token
+	-- ── "Horizon": branded splash that really loads the interface behind it ──────────
 	local k = Util.Clamp((cfg.Duration or 1.9) / 1.9, 0.4, 3)
 	local W, H = self.Size.X, self.Size.Y
 	self._introPlaying = true
 	self:_UpdateHandle()
 
 	holder.Visible = true
-	holder.Size = UDim2.fromOffset(W, 3)
-	self.Scaler.Scale = 1
-	Util.FadeCanvas(main, 0, 0, nil, true)
+	holder.Size = UDim2.fromOffset(W, H)
+	self.Scaler.Scale = 0.96
+	Util.FadeCanvas(main, 1, 0, nil, true)
 
 	local cover = New("CanvasGroup", {
 		Name = "Intro", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(W, H),
@@ -3594,88 +4364,191 @@ function Window:_PlayIntro()
 	Util.Corner(cover, 16)
 	Theme.WindowGradient(cover, 35)
 	Fx.Backdrop(cover, 0)
-	local coverScale = New("UIScale", { Parent = cover })
 
-	-- the glowing line the window opens from
-	local core = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.new(1, 0, 0, 2), BackgroundColor3 = WHITE, ZIndex = 5, Parent = cover })
-	Theme.AccentGradient(core, 0)
-	local coreFade = New("UIGradient", { Rotation = 0, Transparency = NumberSequence.new({ kp(0, 1), kp(0.2, 0), kp(0.8, 0), kp(1, 1) }), Parent = core })
-
-	-- logo with a spinning ring
+	-- logo with a ring that fills as the real work progresses
 	local logoBox = New("Frame", {
-		BackgroundTransparency = 1, AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 0.5, -34), Size = UDim2.fromOffset(68, 68), ZIndex = 4, Parent = cover,
+		BackgroundTransparency = 1, AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 0.5, -64), Size = UDim2.fromOffset(64, 64), ZIndex = 4, Parent = cover,
 	})
-	local logoScale = New("UIScale", { Scale = 0.4, Parent = logoBox })
-	local spin = Fx.SpinRing(logoBox, { Size = 68, Thickness = 3, Speed = 0.9, AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5) })
-	local tile = makeLogo(logoBox, self.Opts.Icon or "sparkles", 40, 12)
+	local spin = Fx.SpinRing(logoBox, { Size = 64, Thickness = 2.5, Speed = 1.0, AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5) })
+	local tile = makeLogo(logoBox, self.Opts.Icon or "sparkles", 38, 11)
 	tile.AnchorPoint = Vector2.new(0.5, 0.5)
 	tile.Position = UDim2.fromScale(0.5, 0.5)
 
-	local titleText = cfg.Title or self.Opts.Title or "Vesper"
-	local title = New("TextLabel", {
-		Weight = "SemiBold", TextSize = 21, Text = titleText, MaxVisibleGraphemes = 0, AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0.5, 14),
-		Size = UDim2.new(0, 420, 0, 26), TextXAlignment = Enum.TextXAlignment.Center, ZIndex = 4, Parent = cover,
+	-- wordmark: the brand, set letter by letter (tracked out)
+	local word = cfg.Title or "VESPER UI"
+	local letters = {}
+	local wordRow = New("Frame", {
+		BackgroundTransparency = 1, AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0.5, -18), Size = UDim2.fromOffset(0, 30),
+		AutomaticSize = Enum.AutomaticSize.X, ZIndex = 4, Parent = cover,
 	})
-	Theme.Bind(title, { TextColor3 = "Text" })
-	local sub = New("TextLabel", {
-		TextSize = 12, Text = cfg.Subtitle or self.Opts.Subtitle or self.Opts.Author or "Loading", TextTransparency = 1, AnchorPoint = Vector2.new(0.5, 0),
-		Position = UDim2.new(0.5, 0, 0.5, 44), Size = UDim2.new(0, 420, 0, 16), TextXAlignment = Enum.TextXAlignment.Center, ZIndex = 4, Parent = cover,
+	Util.List(wordRow, 6, Enum.FillDirection.Horizontal, Enum.HorizontalAlignment.Center, Enum.VerticalAlignment.Center)
+	for i, code in utf8.codes(word) do
+		local ch = utf8.char(code)
+		if ch == " " then
+			New("Frame", { BackgroundTransparency = 1, Size = UDim2.fromOffset(10, 1), LayoutOrder = i, Parent = wordRow })
+		else
+			local letter = New("TextLabel", {
+				Weight = "Bold", TextSize = 25, Text = ch, TextTransparency = 1, Size = UDim2.new(0, 0, 1, 0), AutomaticSize = Enum.AutomaticSize.X,
+				TextXAlignment = Enum.TextXAlignment.Center, LayoutOrder = i, ZIndex = 4, Parent = wordRow,
+			})
+			Theme.Bind(letter, { TextColor3 = "Text" })
+			table.insert(letters, letter)
+		end
+	end
+	local rule = Util.FadeLine(cover, { AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0.5, 18), Size = UDim2.fromOffset(0, 1), Strength = 0.8, Token = "Accent", ZIndex = 4 })
+
+	local tagline = New("TextLabel", {
+		TextSize = 11, Text = string.upper(cfg.Tagline or "Interface library for Roblox"), TextTransparency = 1, AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0.5, 26), Size = UDim2.new(0, 420, 0, 14), TextXAlignment = Enum.TextXAlignment.Center, ZIndex = 4, Parent = cover,
 	})
-	Theme.Bind(sub, { TextColor3 = "Muted" })
-	local track = New("Frame", { AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0.5, 72), Size = UDim2.fromOffset(150, 3), BackgroundColor3 = WHITE, BackgroundTransparency = 1, ZIndex = 4, Parent = cover })
+	Theme.Bind(tagline, { TextColor3 = "SubText" })
+
+	local status = New("TextLabel", {
+		Weight = "Medium", TextSize = 12, Text = "Starting", TextTransparency = 1, AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0.5, 62),
+		Size = UDim2.new(0, 420, 0, 16), TextXAlignment = Enum.TextXAlignment.Center, ZIndex = 4, Parent = cover,
+	})
+	Theme.Bind(status, { TextColor3 = "Text" })
+	local detail = New("TextLabel", {
+		TextSize = 11, Text = "", TextTransparency = 1, AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0.5, 79),
+		Size = UDim2.new(0, 420, 0, 14), TextXAlignment = Enum.TextXAlignment.Center, ZIndex = 4, Parent = cover,
+	})
+	Theme.Bind(detail, { TextColor3 = "Muted" })
+
+	local track = New("Frame", { AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0.5, 100), Size = UDim2.fromOffset(190, 3), BackgroundColor3 = WHITE, BackgroundTransparency = 1, ZIndex = 4, Parent = cover })
 	Theme.Bind(track, { BackgroundColor3 = "Input" })
 	Util.Corner(track, 2)
-	local fill = New("Frame", { Size = UDim2.fromScale(0, 1), BackgroundColor3 = WHITE, Parent = track })
+	local fill = New("Frame", { Size = UDim2.fromScale(0, 1), BackgroundColor3 = WHITE, BackgroundTransparency = 1, ZIndex = 5, Parent = track })
 	Util.Corner(fill, 2)
 	Theme.AccentGradient(fill, 0)
+	local bar = Util.Smoother(0, 7, function(v) if fill.Parent then fill.Size = UDim2.fromScale(Util.Clamp(v, 0, 1), 1) end end)
+	self._introBar = bar
 
-	local function alive() return self._introToken == token and not self.Destroyed end
+	-- credits: a quiet line along the bottom edge
+	local creditMid = New("TextLabel", {
+		TextSize = 11, Text = cfg.Credit or ("Made by " .. tostring(Vesper.Author) .. "  ·  Discord: " .. tostring(Vesper.Author)), TextTransparency = 1, AnchorPoint = Vector2.new(0.5, 1),
+		Position = UDim2.new(0.5, 0, 1, -14), Size = UDim2.new(0, 420, 0, 14), TextXAlignment = Enum.TextXAlignment.Center, ZIndex = 4, Parent = cover,
+	})
+	Theme.Bind(creditMid, { TextColor3 = "Muted" })
+	local versionLabel = New("TextLabel", {
+		TextSize = 10, Text = "v" .. Vesper.Version, TextTransparency = 1, AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 16, 1, -14),
+		Size = UDim2.fromOffset(80, 14), ZIndex = 4, Parent = cover,
+	})
+	Theme.Bind(versionLabel, { TextColor3 = "Muted" })
+	local hubLabel = New("TextLabel", {
+		TextSize = 10, Text = tostring(self.Opts.Title or ""), TextTransparency = 1, AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -16, 1, -14),
+		Size = UDim2.fromOffset(160, 14), TextXAlignment = Enum.TextXAlignment.Right, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 4, Parent = cover,
+	})
+	Theme.Bind(hubLabel, { TextColor3 = "Muted" })
+	local secondary = { tagline, status, detail, creditMid, versionLabel, hubLabel }
+
+	local function setStatus(text, extra)
+		if status.Parent then status.Text = text or status.Text end
+		if detail.Parent then detail.Text = extra or "" end
+	end
+
+	-- the real work, as weighted stages (the bar is their sum: nothing here is timed)
+	local stages = {
+		{ Name = "Loading icons", Weight = 6, Value = 0 },
+		{ Name = "Preparing interface", Weight = 2, Value = 0 },
+	}
+	local extra = type(cfg.Tasks) == "table" and cfg.Tasks or {}
+	for _, def in extra do table.insert(stages, { Name = def.Name or def.Title or "Working", Weight = def.Weight or 2, Value = 0, Def = def }) end
+	table.insert(stages, { Name = "Applying theme", Weight = 1, Value = 0 })
+	local totalWeight = 0
+	for _, st in stages do totalWeight += st.Weight end
+	local function push()
+		local sum = 0
+		for _, st in stages do sum += st.Weight * st.Value end
+		bar.Set(sum / totalWeight)
+	end
 
 	Sound.Play("Open")
+	Util.FadeCanvas(main, 0, 0.35 * k, "Out")
+	Util.Tween(self.Scaler, 0.4 * k, { Scale = 1 }, "Out")
+
 	task.spawn(function()
-		-- 1. the slit opens into the window
-		Util.Tween(holder, 0.62 * k, { Size = UDim2.fromOffset(W, H) }, "Out")
-		task.wait(0.18 * k)
-		if not alive() then return end
-		Util.Tween(logoScale, 0.5 * k, { Scale = 1 }, "Back")
+		local t0 = os.clock()
+		-- entrance: logo, then the wordmark letter by letter, then the rest
+		Util.Tween(track, 0.3 * k, { BackgroundTransparency = 0 }, "Quad")
+		Util.Tween(fill, 0.3 * k, { BackgroundTransparency = 0 }, "Quad")
+		for i, letter in letters do
+			task.delay(0.12 * k + (i - 1) * 0.05 * k, function()
+				if letter.Parent then Util.Tween(letter, 0.3 * k, { TextTransparency = 0 }, "Out") end
+			end)
+		end
+		Util.Tween(rule, 0.6 * k, { Size = UDim2.fromOffset(150, 1) }, "Out")
+		task.delay(0.35 * k, function()
+			for _, label in secondary do
+				if label.Parent then Util.Tween(label, 0.4 * k, { TextTransparency = label == status and 0 or 0.1 }, "Quad") end
+			end
+		end)
 		task.wait(0.3 * k)
 		if not alive() then return end
-		Util.Tween(core, 0.5 * k, { BackgroundTransparency = 1 }, "Quad")
 
-		-- 2. the title types itself, the bar fills
-		Util.Tween(sub, 0.4 * k, { TextTransparency = 0 }, "Quad")
-		Util.Tween(track, 0.3 * k, { BackgroundTransparency = 0 }, "Quad")
-		Util.Tween(fill, 0.85 * k, { Size = UDim2.fromScale(1, 1) }, "Sine")
-		local n = utf8.len(titleText) or #titleText
-		task.spawn(function()
-			for i = 1, n do
-				if not alive() then return end
-				title.MaxVisibleGraphemes = i
-				task.wait(math.min(0.045, 0.5 * k / math.max(n, 1)))
-			end
-			title.MaxVisibleGraphemes = -1
+		-- 1. icons: every sheet the interface drew is downloaded for real (ContentProvider progress)
+		local iconStage = stages[1]
+		self:_PrepareIcons(function(fraction, label, info)
+			iconStage.Value = fraction * 0.9
+			setStatus(label, info)
+			push()
 		end)
-		task.wait(0.95 * k)
+		iconStage.Value = 0.9
+		push()
 		if not alive() then return end
 
-		-- 3. flourish, then the cover dissolves
-		Fx.Burst(cover, { X = W / 2, Y = H / 2 - 34, Count = 12, Distance = 70, Size = 4.5, Duration = 0.75, ZIndex = 20 })
+		-- 2. every loaded sheet is drawn once so the textures are ready (no blurry first frames)
+		setStatus("Preparing interface", "")
+		Icons.Warm(cover)
+		iconStage.Value = 1
+		stages[2].Value = 1
+		push()
+		if not alive() then return end
+
+		-- 3. the script's own tasks
+		for _, st in stages do
+			if st.Def then
+				setStatus(st.Name, "")
+				local ok, err = pcall(st.Def.Run or st.Def.Callback or function() end, function(fraction, text, info)
+					st.Value = Util.Clamp(tonumber(fraction) or 0, 0, 1)
+					if text then setStatus(text, info or "") end
+					push()
+				end)
+				if not ok then warn("[Vesper] intro task '" .. tostring(st.Name) .. "' failed: " .. tostring(err)) end
+				st.Value = 1
+				push()
+				if not alive() then return end
+			end
+		end
+
+		setStatus("Applying theme", "")
+		stages[#stages].Value = 1
+		push()
+		task.wait(0.15)
+
+		-- the splash is never shorter than the configured duration, so the brand is actually readable
+		local rest = (cfg.Duration or 1.9) - (os.clock() - t0)
+		if rest > 0 then task.wait(rest) end
+		if not alive() then return end
+		setStatus("Ready", "")
+		bar.Set(1)
 		Sound.Play("Success")
-		Util.Tween(spin, 0.3 * k, { Size = UDim2.fromOffset(86, 86) }, "Out")
-		task.wait(0.22 * k)
+		task.wait(0.3 * k)
 		if not alive() then return end
 
+		-- 4. hand over: the splash fades, the sidebar and the page settle into place
 		local sw = self.Collapsed and SIDEBAR_C or SIDEBAR_W
-		self.Sidebar.Position = UDim2.fromOffset(-28, 0)
-		self.Content.Position = UDim2.new(0, sw, 0, 16)
-		Util.Tween(self.Sidebar, 0.55 * k, { Position = UDim2.new() }, "Out")
-		Util.Tween(self.Content, 0.55 * k, { Position = UDim2.new(0, sw, 0, 0) }, "Out")
-		Util.Tween(cover, 0.5 * k, { GroupTransparency = 1 }, "Quad")
-		Util.Tween(coverScale, 0.5 * k, { Scale = 1.05 }, "Quad")
-		task.wait(0.55 * k)
-		if not alive() then return end
-		self:_EndIntro()
-		Util.FadeCanvas(main, self.Opacity, 0.2, "Quad")
+		self.Sidebar.Position = UDim2.fromOffset(-14, 0)
+		self.Content.Position = UDim2.new(0, sw, 0, 10)
+		Util.Tween(self.Sidebar, 0.5 * k, { Position = UDim2.new() }, "Out")
+		Util.Tween(self.Content, 0.5 * k, { Position = UDim2.new(0, sw, 0, 0) }, "Out")
+		Util.Tween(spin, 0.3 * k, { Size = UDim2.fromOffset(64, 64) }, "Out")
+		local tw = Util.Tween(cover, 0.45 * k, { GroupTransparency = 1 }, "CubicIn")
+		Util.OnDone(tw, 0.45 * k, function()
+			if alive() then
+				self:_EndIntro()
+				Util.FadeCanvas(main, self.Opacity, 0.2, "Quad")
+			end
+		end)
 	end)
 end
 
@@ -3686,6 +4559,8 @@ function Window:_ActiveCanvas() return self.Minimized and self.PillCanvas or sel
 function Window:Show()
 	if self.Destroyed then return end
 	self.Visible = true
+	self._visToken = (self._visToken or 0) + 1
+	self.Host.Gui.Enabled = true
 	if self.Minimized then
 		self.Pill.Visible = true
 		Util.FadeCanvas(self.PillCanvas, 0, 0.3, "Out")
@@ -3693,25 +4568,32 @@ function Window:Show()
 		self:_PlayIntro()
 	else
 		self.Holder.Visible = true
-		Util.FadeCanvas(self.Main, self.Opacity, 0.4, "Out")
-		Util.Tween(self.Scaler, 0.45, { Scale = 1 }, "Back")
+		Util.FadeCanvas(self.Main, self.Opacity, 0.32, "Out")
+		Util.Tween(self.Scaler, 0.32, { Scale = 1 }, "Out")
 	end
 	self:_UpdateHandle()
 	if self._introDone and not self._introPlaying then Sound.Play("Open") end
 end
 
+--- Fade + settle, then really close: the holder, the pill and the whole ScreenGui are switched off the
+--- moment the animation has finished, so nothing invisible is left behind to swallow clicks.
 function Window:Hide()
 	if self.Destroyed then return end
 	self:_EndIntro()
 	self.Visible = false
+	self._visToken = (self._visToken or 0) + 1
+	local token = self._visToken
 	if self.Host._popover then self.Host._popover.Close() end
 	self:_CloseSearch(true)
-	Util.FadeCanvas(self:_ActiveCanvas(), 1, 0.22, "Quad")
-	if not self.Minimized then Util.Tween(self.Scaler, 0.25, { Scale = 0.95 }, "Quad") end
+	local tw = Util.FadeCanvas(self:_ActiveCanvas(), 1, 0.2, "CubicIn")
+	if not self.Minimized then Util.Tween(self.Scaler, 0.2, { Scale = 0.96 }, "CubicIn") end
 	Sound.Play("Close")
 	self:_UpdateHandle()
-	task.delay(0.26, function()
-		if not self.Visible and not self.Destroyed then self.Holder.Visible = false; self.Pill.Visible = false end
+	Util.OnDone(tw, 0.2, function()
+		if self._visToken ~= token or self.Visible or self.Destroyed then return end
+		self.Holder.Visible = false
+		self.Pill.Visible = false
+		self.Host.Gui.Enabled = false
 	end)
 end
 
@@ -3733,11 +4615,11 @@ function Window:Minimize()
 	self:_SetPillOffset(start)
 	local target = self.PillOffset
 	Util.FadeCanvas(self.Main, 1, 0.24, "Quad")
-	Util.Tween(self.Scaler, 0.28, { Scale = 0.55 }, "In")
-	Util.Tween(self.Holder, 0.28, { Position = UDim2.new(0.5, target.X, 0.5, target.Y) }, "In")
+	Util.Tween(self.Scaler, 0.28, { Scale = 0.6 }, "CubicIO")
+	local tw = Util.Tween(self.Holder, 0.28, { Position = UDim2.new(0.5, target.X, 0.5, target.Y) }, "CubicIO")
 	Util.FadeCanvas(self.PillCanvas, 0, 0.3, "Out")
 	self:_UpdateHandle(true)
-	task.delay(0.3, function()
+	Util.OnDone(tw, 0.28, function()
 		if self.Minimized and not self.Destroyed then
 			self.Holder.Visible = false
 			self.Scaler.Scale = 1
@@ -3762,14 +4644,14 @@ function Window:Restore()
 		return
 	end
 	self.Holder.Position = UDim2.new(0.5, pillOff.X, 0.5, pillOff.Y)
-	self.Scaler.Scale = 0.55
+	self.Scaler.Scale = 0.6
 	self.Holder.Visible = true
-	Util.FadeCanvas(self.PillCanvas, 1, 0.2, "Quad")
+	local tw = Util.FadeCanvas(self.PillCanvas, 1, 0.2, "Quad")
 	Util.FadeCanvas(self.Main, self.Opacity, 0.35, "Out")
-	Util.Tween(self.Scaler, 0.4, { Scale = 1 }, "Back")
-	Util.Tween(self.Holder, 0.4, { Position = UDim2.new(0.5, final.X, 0.5, final.Y) }, "Out")
+	Util.Tween(self.Scaler, 0.38, { Scale = 1 }, "Out")
+	Util.Tween(self.Holder, 0.38, { Position = UDim2.new(0.5, final.X, 0.5, final.Y) }, "Out")
 	self:_UpdateHandle(true)
-	task.delay(0.24, function() if not self.Minimized then self.Pill.Visible = false end end)
+	Util.OnDone(tw, 0.2, function() if not self.Minimized then self.Pill.Visible = false end end)
 end
 
 function Window:ToggleFullscreen()
@@ -3846,14 +4728,23 @@ function Window:Destroy()
 	for flag, element in self.Flags do
 		if Vesper.Flags[flag] == element then Vesper.Flags[flag] = nil end
 	end
-	Util.FadeCanvas(self:_ActiveCanvas(), 1, 0.25, "Quad")
-	Util.Tween(self.Scaler, 0.25, { Scale = 0.94 }, "Quad")
-	self:_UpdateHandle()
-	Sound.Play("Close")
-	task.delay(0.32, function()
+	if self.Host._popover then self.Host._popover.Close() end
+	self._visToken = (self._visToken or 0) + 1
+	local function finish()
 		self.Maid:Clean()
 		self.Host:Destroy()
-	end)
+	end
+	self:_UpdateHandle()
+	Sound.Play("Close")
+	if self._gateDismiss then
+		-- the key gate is still up: it fades away and the whole interface goes with it
+		self._gateDismiss(finish)
+		return
+	end
+	local tw = Util.FadeCanvas(self:_ActiveCanvas(), 1, 0.2, "CubicIn")
+	Util.Tween(self.Scaler, 0.2, { Scale = 0.96 }, "CubicIn")
+	-- removed the instant the fade has finished (Completed), not on a timer that may be longer than the animation
+	Util.OnDone(tw, 0.2, finish)
 end
 
 -- ── Dialog / Tag ─────────────────────────────────────────────
@@ -4250,9 +5141,9 @@ function Window:_SetupSearch()
 
 	local list = New("ScrollingFrame", {
 		Position = UDim2.fromOffset(0, HEAD_H + 1), Size = UDim2.new(1, 0, 1, -(HEAD_H + 1 + (touch and 6 or FOOT_H))), AutomaticCanvasSize = Enum.AutomaticSize.Y,
-		ScrollBarThickness = 2, ScrollBarImageTransparency = 0.4, VerticalScrollBarInset = Enum.ScrollBarInset.None, Parent = canvas,
+		Parent = canvas,
 	})
-	Theme.Bind(list, { ScrollBarImageColor3 = "Muted" })
+	Util.Scroller(list, { Parent = canvas, Inset = 6, Right = 4, Width = 2 })
 	Util.Padding(list, 4, 6, 4, 6)
 	Util.List(list, GAP)
 
@@ -4339,9 +5230,9 @@ function Window:_SetupSearch()
 	local function closePanel()
 		if not isOpen then return end
 		isOpen = false
-		Util.FadeCanvas(canvas, 1, 0.14, "Quad")
-		Util.Tween(pop, 0.16, { Scale = 0.96 }, "Quad")
-		task.delay(0.18, function() if not isOpen then holder.Visible = false end end)
+		local tw = Util.FadeCanvas(canvas, 1, 0.14, "Quad")
+		Util.Tween(pop, 0.14, { Scale = 0.96 }, "Quad")
+		Util.OnDone(tw, 0.14, function() if not isOpen then holder.Visible = false end end)
 	end
 
 	local function render()
@@ -4566,7 +5457,7 @@ end
 
 --- Click effect for a row
 function Elements.Click(row, color)
-	Fx.Click(row.Frame, { Color = color or "Accent", Radius = UDim.new(0, 12) })
+	Fx.Click(row.Frame, { Color = color or "Accent", Radius = UDim.new(0, 12), Category = "Elements" })
 end
 
 -- ─────────────────────────────────────────────────────────────
@@ -4586,7 +5477,6 @@ function Elements.Row(container, opts, rightW, rightH, interactive)
 	local shade = Util.Shade(card, 90, 0.07)
 	local edge = Edge.Attach(card, "Card", { Radius = 12, Inset = 9, ShadowAlpha = 0.84, Alpha = 0.42, Mode = opts.Edge, ZIndex = 4 })
 	local depth = edge.Contact
-	if interactive then Util.PressScale(card, card, 0.988) end
 
 	local body = New("Frame", { Name = "Body", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, Active = false, Parent = card })
 	local pad = Util.Padding(body, 8, 16, 8, 16)
@@ -4884,9 +5774,7 @@ function Elements.MakeSwitch(parent, w, h, o)
 		pressed = down
 		place(false, down and 0.12 or 0.3, down and "Quad" or "Back")
 	end
-	function sw.Burst()
-		Fx.Burst(track, { X = knobX(sw.On) + knobSize / 2, Y = h / 2, Count = 6, Distance = 20, Size = 3, Duration = 0.45 })
-	end
+	function sw.Burst() end   -- toggles no longer throw particles; the row's own click effect is the only feedback
 	return sw
 end
 
@@ -5056,7 +5944,6 @@ Elements.Create.Button = function(container, opts)
 		fxColor = WHITE
 		card.MouseEnter:Connect(function()
 			Util.Tween(card, 0.14, { BackgroundColor3 = Color3.new(0.9, 0.9, 0.9) }, "Quad")
-			Fx.Sheen(card, { Radius = UDim.new(0, 12), Alpha = 0.78, Duration = 0.7 })
 		end)
 		card.MouseLeave:Connect(function() Util.Tween(card, 0.14, { BackgroundColor3 = WHITE }, "Quad") end)
 	elseif variant == "Danger" then
@@ -5190,7 +6077,6 @@ Elements.Create.Checkbox = function(container, opts)
 		paint()
 		if changed and not silent then
 			Sound.Play(value and "ToggleOn" or "ToggleOff")
-			if value then Fx.Burst(box, { X = size / 2, Y = size / 2, Count = 7, Distance = 20, Size = 3.5, Duration = 0.5 }) end
 			Util.Fire(opts.Callback, value)
 		end
 	end
@@ -5332,7 +6218,6 @@ Elements.Create.ToggleSlider = function(container, opts)
 		paintState()
 		if changed and not silent then
 			Sound.Play(on and "ToggleOn" or "ToggleOff")
-			if on then Fx.Burst(track, { X = knob.AbsolutePosition.X and (knob.AbsolutePosition.X - track.AbsolutePosition.X + KNOB / 2) / Util.GetScale(track) or 0, Y = TRACK_H / 2, Count = 6, Distance = 18, Size = 3, Duration = 0.45 }) end
 			fire()
 		end
 	end
@@ -5446,7 +6331,7 @@ Elements.Create.Stepper = function(container, opts)
 			if obj.Locked then return end
 			holdId += 1
 			local id = holdId
-			Fx.Ripple(btn, { Alpha = 0.8, Ring = false, Duration = 0.4, Radius = UDim.new(0, 9) })
+			Fx.Click(btn, { Category = "Elements", Radius = UDim.new(0, 9) })
 			Fx.Pop(img, dir * 18)
 			obj:Set(obj.Value + dir * step)
 			task.delay(0.4, function()
@@ -5498,7 +6383,7 @@ Elements.Create.Segmented = function(container, opts)
 		btn.Activated:Connect(function()
 			if obj.Locked then return end
 			Sound.Play("Select")
-			Fx.Ripple(btn, { Alpha = 0.88, Ring = false, Duration = 0.45, Radius = UDim.new(0, 9) })
+			Fx.Click(btn, { Category = "Elements", Radius = UDim.new(0, 9) })
 			obj:Set(value)
 		end)
 	end
@@ -5870,9 +6755,9 @@ Elements.Create.Dropdown = function(container, opts)
 			Build = function(frame, popover)
 				local list = New("ScrollingFrame", {
 					Position = UDim2.fromOffset(0, top), Size = UDim2.new(1, 0, 1, -(top + foot)), AutomaticCanvasSize = Enum.AutomaticSize.Y,
-					ScrollBarThickness = 2, ScrollBarImageTransparency = 0.4, VerticalScrollBarInset = Enum.ScrollBarInset.None, Parent = frame,
+					Parent = frame,
 				})
-				Theme.Bind(list, { ScrollBarImageColor3 = "Muted" })
+				Util.Scroller(list, { Parent = frame, Inset = 6, Right = 4, Width = 2 })
 				Util.Padding(list, 5, 6, 5, 6)
 				Util.List(list, GAP)
 
@@ -5957,7 +6842,7 @@ Elements.Create.Dropdown = function(container, opts)
 							btn.MouseLeave:Connect(function() Util.Tween(btn, 0.15, { BackgroundTransparency = 1 }, "Quad") end)
 							btn.Activated:Connect(function()
 								Sound.Play("Select")
-								Fx.Ripple(btn, { Alpha = 0.86, Ring = false, Duration = 0.45, Radius = UDim.new(0, 9) })
+								Fx.Click(btn, { Category = "Popups", Radius = UDim.new(0, 9) })
 								if multi then
 									local at = table.find(obj.Value, item.Value)
 									if at then
@@ -6524,7 +7409,6 @@ Elements.Create.Colorpicker = function(container, opts)
 				Util.Corner(copy, 9)
 				Util.Shade(copy, 90, 0.1)
 				Edge.Attach(copy, "Button", { Radius = 9, Alpha = 0.5, Contact = false, ZIndex = 4 })
-				Util.PressScale(copy, copy, 0.92)
 				local copyIcon = Util.Icon(copy, "copy", 15, "SubText", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5) })
 				local copyToken = 0
 				copy.MouseEnter:Connect(function() Util.Tween(copyIcon, 0.15, { ImageColor3 = Theme.Current.Text }, "Quad") end)
@@ -6638,7 +7522,6 @@ Elements.Create.Colorpicker = function(container, opts)
 					Edge.Attach(chipBtn, "Chip", { Radius = 7, Alpha = 0.55, Contact = false, ZIndex = 4 })
 					chipBtn.MouseEnter:Connect(function() Util.Tween(chipBtn, 0.16, { Position = UDim2.fromOffset(px, presetY - 3) }, "Back") end)
 					chipBtn.MouseLeave:Connect(function() Util.Tween(chipBtn, 0.22, { Position = UDim2.fromOffset(px, presetY) }, "Quad") end)
-					Util.PressScale(chipBtn, chipBtn, 0.88)
 					chipBtn.Activated:Connect(function()
 						Sound.Play("Tick")
 						takeColor(color)
@@ -6835,7 +7718,7 @@ Elements.Create.Code = function(container, opts)
 		btn.Activated:Connect(function()
 			Sound.Play("Click")
 			Util.Copy(obj.Code)
-			Fx.Ripple(btn, { Alpha = 0.8, Ring = false, Duration = 0.45, Radius = UDim.new(0, 8) })
+			Fx.Click(btn, { Category = "Elements", Radius = UDim.new(0, 8) })
 			Util.SetPart(icon, "Copied", true)
 			Icons.Apply(icon, "check", 14, "Success")
 			Fx.Pop(icon, 0)
@@ -7071,12 +7954,19 @@ function ConfigManager:Serialize()
 		end
 	end
 	return {
-		Version = 3, Theme = Theme.Current.Name, Mode = Theme.Mode,
+		Version = 4, Theme = Theme.Current.Name, Mode = Theme.Mode,
 		Appearance = {
 			Edge = { Mode = Edge.Mode, Style = Edge.Style, Thickness = Edge.Thickness, Strength = Edge.Strength },
 			Style = Theme.StyleOverride or "Default",
 			Animated = Theme.Animated,
 			Click = Fx.Style,
+			Effects = (function()
+				local out = {}
+				for category, value in Fx.Config do
+					if type(value) == "string" or type(value) == "boolean" then out[category] = value end   -- functions cannot be saved
+				end
+				return out
+			end)(),
 			Lines = { Style = Lines.Style, Thickness = Lines.Thickness, Strength = Lines.Strength, Color = Lines.Color },
 			Shadow = { Depth = Shadow.Config.Depth, Strength = Shadow.Config.Strength, Soft = Shadow.Config.Soft },
 		},
@@ -7086,14 +7976,18 @@ end
 
 function ConfigManager:Apply(data)
 	if type(data) ~= "table" then return false end
-	if data.Mode == "Dark" or data.Mode == "Light" then Theme.SetMode(data.Mode) end
+	-- the theme first (it carries its own mode), then the mode, which swaps in the twin when they differ
 	if data.Theme and Theme.Themes[data.Theme] then Theme.Set(data.Theme) end
+	if data.Mode == "Dark" or data.Mode == "Light" then Theme.SetMode(data.Mode) end
 	local look = data.Appearance
 	if type(look) == "table" then
 		if type(look.Edge) == "table" then Edge.Set(look.Edge) end
 		if look.Style ~= nil then Theme.SetStyle(look.Style) end
 		if look.Animated ~= nil then Theme.SetAnimated(look.Animated) end
 		if look.Click ~= nil then Fx.SetStyle(look.Click) end
+		if type(look.Effects) == "table" then
+			for category, value in look.Effects do Fx.SetEffect(category, value) end
+		end
 		if type(look.Lines) == "table" then Vesper:SetLines(look.Lines) end
 		if type(look.Shadow) == "table" then Vesper:SetShadow(look.Shadow) end
 		if self.Window._syncAppearance then pcall(self.Window._syncAppearance) end
@@ -7313,14 +8207,20 @@ function Vesper._KeyGate(window, ks)
 	local gate, bg, holder, card, pop
 	local unlocked = false
 
-	local function dismiss()
-		if not gate then return end
+	--- fade the gate away; `after` runs the moment it is really gone (Completed, not a timer)
+	local function dismiss(after)
+		window._gateDismiss = nil
+		if not gate then if after then after() end return end
 		local g, b, c, p = gate, bg, card, pop
 		gate = nil
-		Util.FadeCanvas(c, 1, 0.3, "Quad")
-		Util.Tween(p, 0.35, { Scale = 1.07 }, "Quad")
-		Util.Tween(b, 0.5, { GroupTransparency = 1 }, "Quad")
-		task.delay(0.6, function() g:Destroy() end)
+		g.Active = false
+		Util.FadeCanvas(c, 1, 0.26, "CubicIn")
+		Util.Tween(p, 0.26, { Scale = 0.97 }, "CubicIn")
+		local tw = Util.Tween(b, 0.34, { GroupTransparency = 1 }, "Quad")
+		Util.OnDone(tw, 0.34, function()
+			g:Destroy()
+			if after then after() end
+		end)
 	end
 
 	local function unlock(key)
@@ -7334,9 +8234,7 @@ function Vesper._KeyGate(window, ks)
 			end)
 		end
 		if ks.Callback then Util.Fire(ks.Callback, key) end
-		local hadGate = gate ~= nil
-		dismiss()
-		task.delay(hadGate and 0.25 or 0, function()
+		dismiss(function()
 			if not window.Destroyed then window:Show() end
 		end)
 	end
@@ -7353,6 +8251,7 @@ function Vesper._KeyGate(window, ks)
 		if window.Destroyed then return end
 
 		gate = New("Frame", { Name = "KeyGate", BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1), ZIndex = 50, Active = true, Parent = host.Root })
+		window._gateDismiss = dismiss
 
 		-- background: deep base + the animated theme backdrop + vignette (one canvas so it fades as one piece)
 		bg = New("CanvasGroup", { Name = "Bg", BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1), GroupTransparency = 1, Parent = gate })
@@ -7766,13 +8665,17 @@ function Vesper:CreateKeySystem(ks)
 		if key then gate.Unlocked, gate.Key = true, key else gate.Closed = true end
 		for _, thread in gate._waiters do task.spawn(thread, gate.Key) end
 		table.clear(gate._waiters)
-		task.delay(1.4, function() host:Destroy() end)
+		host:Destroy()   -- the gate has already faded out by now, so nothing is left running in the background
 	end
 
 	-- the key gate talks to a window; this stands in for one
 	local proxy = { Host = host, Folder = ks.Folder or "Vesper", Opts = { Icon = ks.Icon }, Destroyed = false, _locked = true }
 	function proxy:Show() proxy.Destroyed = true; finish(gate.Key) end
-	function proxy:Destroy() proxy.Destroyed = true; finish(nil) end
+	function proxy:Destroy()
+		proxy.Destroyed = true
+		local d = proxy._gateDismiss
+		if d then d(function() finish(nil) end) else finish(nil) end
+	end
 
 	local options = table.clone(ks)
 	options.Callback = function(key)
@@ -7787,8 +8690,8 @@ function Vesper:CreateKeySystem(ks)
 	end
 	function gate:Destroy()
 		proxy.Destroyed = true
-		finish(nil)
-		host:Destroy()
+		local d = proxy._gateDismiss
+		if d then d(function() finish(nil) end) else finish(nil) end
 	end
 
 	Vesper._KeyGate(proxy, options)
@@ -7796,7 +8699,11 @@ function Vesper:CreateKeySystem(ks)
 end
 
 --- Loading screen. See the notes at the top of this file.
---- cfg = { Title, Subtitle, Status, Icon, Banner, Steps, Duration, Manual, Percent = true, Width, Background, Callback, DoneText, DoneTitle }
+--- cfg = { Title, Subtitle, Status, Icon, Banner, Percent = true, Width, Background, Callback, DoneText, DoneTitle,
+---         Preload = { extra icon names }, Assets = { asset ids / urls }, Tasks = { { Name, Weight, Run = function(report) } },
+---         Steps = { labels shown as the real progress passes them }, MinTime = seconds, Manual = true to drive the bar yourself }
+--- The bar is REAL: it is the weighted progress of the work that is actually being done (icon sheets downloaded
+--- through ContentProvider, your assets, your tasks) and is never driven by a timer.
 function Vesper:CreateLoader(cfg)
 	if type(cfg) ~= "table" then cfg = { Title = tostring(cfg or "Loading") } end
 	Layer.Init()
@@ -7884,6 +8791,10 @@ function Vesper:CreateLoader(cfg)
 		})
 		Theme.Bind(percent, { TextColor3 = "Text" })
 	end
+	local detailLabel = New("TextLabel", {
+		TextSize = 11, Size = UDim2.new(1, 0, 0, 14), TextXAlignment = Enum.TextXAlignment.Center, LayoutOrder = 6, Text = cfg.Detail or "", Parent = content,
+	})
+	Theme.Bind(detailLabel, { TextColor3 = "Muted" })
 
 	-- the bar eases toward its target every frame
 	local smoother = Util.Smoother(0, 9, function(value)
@@ -7905,6 +8816,9 @@ function Vesper:CreateLoader(cfg)
 			Util.Tween(statusLabel, 0.22, { TextTransparency = 0, Position = UDim2.fromOffset(0, 0) }, "Out")
 		end)
 	end
+	function loader:SetDetail(text)
+		if detailLabel.Parent then detailLabel.Text = text or "" end
+	end
 	function loader:SetProgress(p, instant)
 		loader.Progress = Util.Clamp(p, 0, 1)
 		smoother.Set(loader.Progress, instant)
@@ -7925,10 +8839,16 @@ function Vesper:CreateLoader(cfg)
 	local function exit()
 		if exited then return end
 		exited = true
-		Util.FadeCanvas(card, 1, 0.3, "Quad")
-		Util.Tween(pop, 0.35, { Scale = 1.07 }, "Quad")
-		Util.Tween(bg, 0.5, { GroupTransparency = 1 }, "Quad")
-		task.delay(0.8, function() host:Destroy() end)
+		gate.Active = false
+		Util.FadeCanvas(card, 1, 0.26, "CubicIn")
+		Util.Tween(pop, 0.26, { Scale = 0.97 }, "CubicIn")
+		local tw = Util.Tween(bg, 0.34, { GroupTransparency = 1 }, "Quad")
+		-- gone for real the moment the fade has finished
+		Util.OnDone(tw, 0.34, function()
+			local at = table.find(Vesper._Screens, host)
+			if at then table.remove(Vesper._Screens, at) end
+			host:Destroy()
+		end)
 	end
 
 	function loader:Complete(text)
@@ -7936,19 +8856,17 @@ function Vesper:CreateLoader(cfg)
 		loader:SetProgress(1)
 		loader:SetStatus(text or cfg.DoneText or "Ready")
 		Sound.Play("Success")
-		task.delay(0.6, function()
+		task.spawn(function()
+			task.wait(0.55)   -- let the bar reach the end
 			if not ring.Parent then return end
 			Fx.RingTone(ring, "Success", true)
-			ringPulse(ring, 76, 1.2)
+			ringPulse(ring, 76, 1.12)
 			if logoIcon then morphIcon(logoIcon, "check", 24, "AccentText") end
-			Fx.Burst(cluster, { X = 38, Y = 38, Count = 12, Distance = 56, Size = 4.5, Duration = 0.8, ZIndex = 20 })
-			Fx.Flash(card, { Color = "Success", Alpha = 0.92, Duration = 0.8, Radius = UDim.new(0, 18) })
 			if cfg.DoneTitle then typeInto(title, Loc.Resolve(cfg.DoneTitle), 0.035) end
-			task.delay(cfg.DoneDelay or 0.9, function()
-				exit()
-				if cfg.Callback then Util.Fire(cfg.Callback) end
-				finish()
-			end)
+			task.wait(cfg.DoneDelay or 0.7)
+			exit()
+			if cfg.Callback then Util.Fire(cfg.Callback) end
+			finish()
 		end)
 	end
 
@@ -7986,43 +8904,129 @@ function Vesper:CreateLoader(cfg)
 		finish()
 	end
 
-	-- entrance
+	-- entrance (no bounce: the card settles in)
 	Sound.Play("Open")
-	Util.Tween(bg, 0.55, { GroupTransparency = 0 }, "Quad")
+	Util.Tween(bg, 0.5, { GroupTransparency = 0 }, "Quad")
 	Util.FadeCanvas(card, 0, 0.35, "Out")
-	Util.Tween(pop, 0.5, { Scale = 1 }, "Back")
-	task.delay(0.12, function() if tile.Parent then Util.Tween(tile, 0.55, { Size = UDim2.fromOffset(50, 50) }, "Back") end end)
+	Util.Tween(pop, 0.4, { Scale = 1 }, "Out")
+	task.delay(0.12, function() if tile.Parent then Util.Tween(tile, 0.45, { Size = UDim2.fromOffset(50, 50) }, "Out") end end)
 	task.delay(0.3, function() if note.Parent then Util.Tween(note, 0.5, { TextTransparency = 0 }, "Quad") end end)
 	task.delay(0.25, function() if title.Parent then typeInto(title, titleText, 0.04) end end)
-	task.delay(0.5, function() if not loader.Done and loader.Progress == 0 then loader:SetProgress(cfg.Initial or 0.04) end end)
 
-	-- auto mode: spread the steps over the duration
-	local steps = cfg.Steps
-	if type(steps) == "table" and #steps > 0 and cfg.Manual ~= true then
-		task.spawn(function()
-			local total = cfg.Duration or math.max(2, #steps * 0.9)
-			task.wait(0.6)
-			for i, text in steps do
-				if loader.Done then return end
-				loader:Step(type(text) == "table" and text.Text or text)
-				local to = i / #steps
-				loader:SetProgress(math.max(to - 0.06, loader.Progress))
-				task.wait(total / #steps * (0.7 + math.random() * 0.6))
-				if loader.Done then return end
-				loader:SetProgress(to * 0.97)
-			end
-			loader:Complete()
+	-- ── real work ────────────────────────────────────────────
+	-- A "unit" is a weighted piece of work reporting 0..1. The bar is their weighted sum, nothing else.
+	local units, byName, totalWeight = {}, {}, 0
+	local function recompute()
+		if totalWeight <= 0 then return end
+		local sum = 0
+		for _, u in units do sum += u.Weight * u.Value end
+		-- never moves backwards, even if more work is registered while it runs
+		loader:SetProgress(math.max(loader.Progress, math.min(sum / totalWeight, 0.995)))
+	end
+	local function addUnit(name, weight)
+		local existing = byName[name]
+		if existing then return existing end
+		local u = { Name = name, Weight = weight or 1, Value = 0 }
+		table.insert(units, u)
+		byName[name] = u
+		totalWeight += u.Weight
+		return u
+	end
+	local steps = type(cfg.Steps) == "table" and cfg.Steps or nil
+	local function stepFor(progress)
+		if not steps or #steps == 0 then return nil end
+		local text = steps[math.min(#steps, math.floor(progress * #steps) + 1)]
+		return type(text) == "table" and text.Text or text
+	end
+
+	--- Download icon sheets (the built-in ones always, plus `names`) with real per-asset progress
+	function loader:LoadIcons(names, weight)
+		local unit = addUnit("Icons", weight or 3)
+		local list = {}
+		for _, n in Icons.Core do table.insert(list, n) end
+		if names then for _, n in names do table.insert(list, n) end end
+		loader:SetStatus("Loading icons")
+		Icons.Preload({
+			Names = list,
+			OnProgress = function(done, total)
+				unit.Value = total == 0 and 1 or done / total
+				loader:SetDetail(total == 0 and "Icons already cached" or string.format("Icon sheet %d / %d", done, total))
+				recompute()
+			end,
+		})
+		unit.Value = 1
+		recompute()
+	end
+
+	--- Load asset ids / urls / instances with ContentProvider (real progress)
+	function loader:LoadAssets(list, weight, label)
+		if type(list) ~= "table" or #list == 0 then return end
+		local unit = addUnit("Assets", weight or 2)
+		loader:SetStatus(label or "Loading assets")
+		local CP = Service("ContentProvider")
+		local done, total = 0, #list
+		local ok = CP and pcall(function()
+			CP:PreloadAsync(list, function()
+				done += 1
+				unit.Value = done / total
+				loader:SetDetail(string.format("Asset %d / %d", done, total))
+				recompute()
+			end)
 		end)
-	elseif cfg.Duration and cfg.Manual ~= true then
+		unit.Value = 1
+		recompute()
+		return ok
+	end
+
+	--- Run your own work: fn(report) where report(fraction, text?, detail?) moves the bar
+	function loader:Run(name, weight, fn)
+		local unit = addUnit(name, weight or 1)
+		loader:SetStatus(name)
+		local ok, err = pcall(fn, function(fraction, text, detail)
+			unit.Value = Util.Clamp(tonumber(fraction) or 0, 0, 1)
+			if text then loader:SetStatus(text) end
+			if detail then loader:SetDetail(detail) end
+			recompute()
+		end)
+		unit.Value = 1
+		recompute()
+		if not ok then warn("[Vesper] loader task '" .. tostring(name) .. "' failed: " .. tostring(err)) end
+		return ok
+	end
+
+	if cfg.Manual ~= true then
 		task.spawn(function()
-			task.wait(0.6)
 			local t0 = os.clock()
-			while not loader.Done do
-				local a = Util.Clamp((os.clock() - t0) / cfg.Duration, 0, 1)
-				loader:SetProgress(a)
-				if a >= 1 then break end
-				task.wait(0.05)
+			-- everything that is going to happen is registered first, so the bar knows the whole job from the start
+			if cfg.Icons ~= false then addUnit("Icons", cfg.IconWeight or 4) end
+			if cfg.Assets then addUnit("Assets", 2) end
+			if type(cfg.Tasks) == "table" then
+				for _, def in cfg.Tasks do addUnit(def.Name or def.Title or "Working", def.Weight) end
 			end
+			task.wait(0.35)   -- the card is on screen before the work starts
+			-- 1. icons (the built-in set plus anything the script wants warm)
+			if cfg.Icons ~= false then loader:LoadIcons(cfg.Preload, cfg.IconWeight or 4) end
+			if loader.Done then return end
+			-- 2. the script's own assets
+			if cfg.Assets then loader:LoadAssets(cfg.Assets, 2) end
+			-- 3. the script's own tasks
+			if type(cfg.Tasks) == "table" then
+				for _, def in cfg.Tasks do
+					if loader.Done then return end
+					loader:Run(def.Name or def.Title or "Working", def.Weight, def.Run or def.Callback or function() end)
+					local text = stepFor(loader.Progress)
+					if text then loader:SetStatus(text) end
+				end
+			end
+			if loader.Done then return end
+			-- 4. put every loaded sheet on screen once so no icon ever shows up blurry
+			if cfg.Icons ~= false then
+				loader:SetStatus("Preparing interface")
+				loader:SetDetail("")
+				Icons.Warm(card)
+			end
+			local wait = (cfg.MinTime or 0) - (os.clock() - t0)
+			if wait > 0 then task.wait(wait) end
 			loader:Complete()
 		end)
 	end
@@ -8060,7 +9064,7 @@ function Window:AddThemesTab()
 	local tab = self:_FooterTab({ Title = "Themes", Icon = "palette" })
 	self._builtin.Themes = tab
 
-	-- swatch grid: each swatch shows the window colour with the accent gradient on top
+	-- swatch grid: each swatch shows the window colour with the accent gradient on top, grouped Dark / Light / Holiday
 	local card = New("Frame", {
 		Name = "ThemePicker", Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = Look.Card, BackgroundColor3 = WHITE,
 		LayoutOrder = Elements.NextOrder(tab), Parent = tab.Content,
@@ -8071,8 +9075,8 @@ function Window:AddThemesTab()
 	Edge.Attach(card, "Card", { Radius = 12, Inset = 9, ShadowAlpha = 0.84, Alpha = 0.42, ZIndex = 4 })
 	local pad = New("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, Parent = card })
 	Util.Padding(pad, 12, 14, 14, 14)
-	Util.List(pad, 12)
-	local entry = Elements.Register(tab, card, "element", "Theme colors appearance", "Pick a theme", { Type = "ThemePicker", Icon = "palette" })
+	Util.List(pad, 10)
+	local entry = Elements.Register(tab, card, "element", "Theme colors appearance holiday dark light", "Pick a theme", { Type = "ThemePicker", Icon = "palette" })
 
 	local header = New("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 18), LayoutOrder = 1, Parent = pad })
 	local title = New("TextLabel", { Weight = "Medium", TextSize = 14, Size = UDim2.fromScale(1, 1), Parent = header })
@@ -8081,56 +9085,110 @@ function Window:AddThemesTab()
 	local nameLabel = New("TextLabel", { Weight = "Medium", TextSize = 12, Size = UDim2.fromScale(1, 1), TextXAlignment = Enum.TextXAlignment.Right, Text = Theme.Current.Name, Parent = header })
 	Theme.Bind(nameLabel, { TextColor3 = "SubText" })
 
-	local grid = New("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, LayoutOrder = 2, Parent = pad })
-	local list = Util.List(grid, 6, Enum.FillDirection.Horizontal)
-	list.Wraps = true
+	-- "Today is …" shortcut when a holiday theme matches the date
+	local todayRow
+	do
+		local today = Theme.HolidaysOn()
+		if #today > 0 then
+			local def = today[1]
+			todayRow = New("Frame", { Name = "Today", Size = UDim2.new(1, 0, 0, 38), BackgroundTransparency = 0, LayoutOrder = 2, Parent = pad })
+			Theme.Bind(todayRow, { BackgroundColor3 = "Input" })
+			Util.Corner(todayRow, 9)
+			Edge.Attach(todayRow, "Button", { Radius = 9, Alpha = 0.5, Contact = false, ZIndex = 4 })
+			Util.Padding(todayRow, 0, 6, 0, 12)
+			local ico = Util.Icon(todayRow, "calendar-heart", 16, "Accent", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.fromScale(0, 0.5) })
+			local text = New("TextLabel", {
+				Weight = "Medium", TextSize = 13, Position = UDim2.fromOffset(26, 0), Size = UDim2.new(1, -110, 1, 0), TextXAlignment = Enum.TextXAlignment.Left,
+				TextTruncate = Enum.TextTruncate.AtEnd, Parent = todayRow,
+			})
+			Theme.Bind(text, { TextColor3 = "Text" })
+			Util.SetText(text, "Today is " .. def.Name)
+			local use = Util.MakeButton({
+				Text = "Use theme", Variant = "Primary", Height = 26, Radius = 7, TextSize = 12, Parent = todayRow,
+				Callback = function() Theme.ApplyHoliday(def.Name) end,
+			})
+			use.AnchorPoint = Vector2.new(1, 0.5)
+			use.Position = UDim2.fromScale(1, 0.5)
+		end
+	end
 
 	local swatches = {}
 	local function paint()
 		local current = Theme.Current.Name
 		nameLabel.Text = current
-		for name, s in swatches do
+		for name, sw in swatches do
 			local def = Theme.Themes[name]
-			Util.Tween(s.Base, 0.3, { BackgroundColor3 = def.Window2 }, "Quad")
-			s.Grad.Color = ColorSequence.new(def.Accent, def.Accent2)
-			local on = name == current
-			Util.Tween(s.Halo, 0.25, { BackgroundTransparency = on and 0.72 or 1, Size = UDim2.fromOffset(on and 40 or 30, on and 40 or 30) }, "Back")
-			Util.Tween(s.Check, 0.2, { ImageTransparency = on and 0 or 1 }, "Quad")
+			if def then
+				Util.Tween(sw.Base, 0.3, { BackgroundColor3 = def.Window2 }, "Quad")
+				sw.Grad.Color = ColorSequence.new(def.Accent, def.Accent2)
+				local on = name == current
+				Util.Tween(sw.Halo, 0.22, { BackgroundTransparency = on and 0.7 or 1 }, "Quad")
+				Util.Tween(sw.Check, 0.2, { ImageTransparency = on and 0 or 1 }, "Quad")
+			end
 		end
 	end
 
-	for i, name in Theme.Order do
-		local def = Theme.Themes[name]
-		local accent, accent2, windowColor = def.Accent, def.Accent2, def.Window2
-		local btn = New("TextButton", { Name = name, Size = UDim2.fromOffset(40, 40), LayoutOrder = i, Parent = grid })
-		local halo = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(30, 30), BackgroundColor3 = WHITE, BackgroundTransparency = 1, Parent = btn })
-		Theme.Bind(halo, { BackgroundColor3 = "Text" })
-		Util.Corner(halo, 40)
-		local base = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(30, 30), BackgroundColor3 = windowColor, ZIndex = 2, Parent = btn })
-		Util.Corner(base, 30)
-		Util.Shade(base, 90, 0.18)
-		local dot = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(20, 20), BackgroundColor3 = WHITE, ZIndex = 3, Parent = btn })
-		Util.Corner(dot, 20)
-		local dotGrad = New("UIGradient", { Rotation = 45, Color = ColorSequence.new(accent, accent2), Parent = dot })
-		local check = Util.Icon(dot, "check", 12, WHITE, { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), ImageTransparency = 1, ZIndex = 4 })
-		check.ImageColor3 = (Util.Luminance(accent) + Util.Luminance(accent2)) / 2 > 0.62 and Color3.fromRGB(18, 18, 22) or WHITE
-		swatches[name] = { Halo = halo, Check = check, Base = base, Grad = dotGrad }
+	local function describe(name)
+		local h = Theme.HolidayIndex[name]
+		if not h then return name end
+		local ok, now = pcall(os.date, "*t")
+		local y = ok and type(now) == "table" and now.year or 2025
+		local sy, sm, sd = Theme.HolidayStart(h, y)
+		local months = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" }
+		return string.format("%s  ·  %s %d", name, months[sm], sd)
+	end
 
-		btn.MouseEnter:Connect(function()
-			nameLabel.Text = name
-			Util.Tween(base, 0.18, { Size = UDim2.fromOffset(34, 34) }, "Back")
-			Util.Tween(dot, 0.18, { Size = UDim2.fromOffset(23, 23) }, "Back")
-		end)
-		btn.MouseLeave:Connect(function()
-			nameLabel.Text = Theme.Current.Name
-			Util.Tween(base, 0.2, { Size = UDim2.fromOffset(30, 30) }, "Quad")
-			Util.Tween(dot, 0.2, { Size = UDim2.fromOffset(20, 20) }, "Quad")
-		end)
-		btn.Activated:Connect(function()
-			Sound.Play("Select")
-			Fx.Burst(btn, { X = 20, Y = 20, Count = 6, Distance = 24, Size = 3, Duration = 0.5, Color = accent, Color2 = accent2 })
-			Theme.Set(name)
-		end)
+	local groupDefs = {
+		{ Key = "Dark", Title = "Dark" },
+		{ Key = "Light", Title = "Light" },
+		{ Key = "Holiday", Title = "Holidays" },
+		{ Key = "Custom", Title = "Custom" },
+	}
+	local order = 10
+	for _, g in groupDefs do
+		local names = Theme.Groups[g.Key]
+		if names and #names > 0 then
+			local label = New("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 14), LayoutOrder = order, Parent = pad })
+			local l = New("TextLabel", { Weight = "Medium", TextSize = 11, Size = UDim2.fromScale(1, 1), Parent = label })
+			Theme.Bind(l, { TextColor3 = "Muted" })
+			Util.SetText(l, g.Title)
+			local grid = New("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, LayoutOrder = order + 1, Parent = pad })
+			local list = Util.List(grid, 6, Enum.FillDirection.Horizontal)
+			list.Wraps = true
+			order += 2
+			for i, name in names do
+				local def = Theme.Themes[name]
+				local accent, accent2, windowColor = def.Accent, def.Accent2, def.Window2
+				local btn = New("TextButton", { Name = name, Size = UDim2.fromOffset(40, 40), LayoutOrder = i, Parent = grid })
+				local halo = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(38, 38), BackgroundColor3 = WHITE, BackgroundTransparency = 1, Parent = btn })
+				Theme.Bind(halo, { BackgroundColor3 = "Text" })
+				Util.Corner(halo, 40)
+				local base = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(32, 32), BackgroundColor3 = windowColor, ZIndex = 2, Parent = btn })
+				Util.Corner(base, 32)
+				Util.Shade(base, 90, 0.18)
+				local dot = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(22, 22), BackgroundColor3 = WHITE, ZIndex = 3, Parent = btn })
+				Util.Corner(dot, 22)
+				local dotGrad = New("UIGradient", { Rotation = 45, Color = ColorSequence.new(accent, accent2), Parent = dot })
+				local check = Util.Icon(dot, "check", 12, WHITE, { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), ImageTransparency = 1, ZIndex = 4 })
+				check.ImageColor3 = (Util.Luminance(accent) + Util.Luminance(accent2)) / 2 > 0.62 and Color3.fromRGB(18, 18, 22) or WHITE
+				swatches[name] = { Halo = halo, Check = check, Base = base, Grad = dotGrad }
+
+				-- hover only changes the name and a soft ring; nothing grows
+				btn.MouseEnter:Connect(function()
+					nameLabel.Text = describe(name)
+					if name ~= Theme.Current.Name then Util.Tween(halo, 0.14, { BackgroundTransparency = 0.88 }, "Quad") end
+				end)
+				btn.MouseLeave:Connect(function()
+					nameLabel.Text = Theme.Current.Name
+					if name ~= Theme.Current.Name then Util.Tween(halo, 0.18, { BackgroundTransparency = 1 }, "Quad") end
+				end)
+				btn.Activated:Connect(function()
+					Sound.Play("Select")
+					Fx.Click(btn, { Category = "Elements", Color = accent, Color2 = accent2, Radius = UDim.new(1, 0) })
+					Theme.Set(name)
+				end)
+			end
+		end
 	end
 	paint()
 	Theme.Watch(card, function() paint() end)
@@ -8140,8 +9198,15 @@ function Window:AddThemesTab()
 	-- Mode ---------------------------------------------------------
 	local appearance = tab:Section({ Title = "Appearance", Icon = "sun-moon" })
 	controls.mode = appearance:Segmented({
-		Title = "Mode", Desc = "Dark or light. The theme colour stays the same, only the surfaces change.", Icon = "sun-moon",
+		Title = "Mode", Desc = "Swaps the theme for its twin: Vesper becomes Lilac Haze, Brass becomes Sandstone, and so on.", Icon = "sun-moon",
 		Values = { "Dark", "Light" }, Default = Theme.Mode, Callback = function(v) Vesper:SetMode(v) end,
+	})
+	controls.holiday = appearance:Toggle({
+		Title = "Holiday themes", Desc = "Open with the holiday theme on the days that have one", Icon = "calendar-heart", Default = Theme.HolidayAuto,
+		Callback = function(v)
+			Theme.HolidayAuto = v
+			if v then Theme.ApplyHoliday("Auto") end
+		end,
 	})
 
 	-- Background ---------------------------------------------------
@@ -8149,12 +9214,12 @@ function Window:AddThemesTab()
 	local styleValues = { "Default" }
 	for _, s in Theme.Styles do table.insert(styleValues, s) end
 	controls.style = look:Dropdown({
-		Title = "Background style", Desc = "Default follows the theme. Plain, Orbs, Streaks, Aurora, Stars, Grid, Shards or Rings.", Icon = "wand-sparkles",
+		Title = "Background style", Desc = "Default follows the theme. Wash, Dots, Contour, Ribbons, Haze and Ruled suit light surfaces; Aurora, Stars, Grid, Embers, Circuit and Shards suit dark ones.", Icon = "wand-sparkles",
 		Values = styleValues, Default = Theme.StyleOverride or "Default", SearchBar = false,
 		Callback = function(v) Theme.SetStyle(v) end,
 	})
 	controls.animated = look:Toggle({
-		Title = "Animated background", Desc = "Let the orbs, streaks and stars drift", Icon = "sparkles", Default = Theme.Animated,
+		Title = "Animated background", Desc = "Let the background move", Icon = "sparkles", Default = Theme.Animated,
 		Callback = function(v) Theme.SetAnimated(v) end,
 	})
 	controls.opacity = look:Slider({
@@ -8218,9 +9283,42 @@ function Window:AddThemesTab()
 	-- Effects -----------------------------------------------------------
 	local fx = tab:Section({ Title = "Effects", Icon = "sparkles" })
 	controls.click = fx:Dropdown({
-		Title = "Click effect", Desc = "What happens when you press something", Icon = "mouse-pointer-click", Values = Fx.Styles, Default = Fx.Style, SearchBar = false,
+		Title = "Click effect", Desc = "The effect every part uses unless it has its own below", Icon = "mouse-pointer-click", Values = Fx.Styles, Default = Fx.Style, SearchBar = false,
 		Callback = function(v) Vesper:SetClickEffect(v) end,
 	})
+	-- per category: Default (follow the click effect above) | Off | any effect
+	local fxWhere = tab:Section({ Title = "Where effects play", Icon = "mouse-pointer-2", Collapsible = true, Opened = false })
+	local fxLabels = {
+		Buttons = { "Buttons", "Button, ButtonRow and dialog buttons" },
+		Tabs = { "Tabs", "The sidebar tabs" },
+		Elements = { "Elements", "Toggles, sliders, inputs, dropdown fields" },
+		WindowButtons = { "Window buttons", "Minimize, close, search and the other title bar buttons" },
+		Popups = { "Popups", "Dropdown lists, dialogs and notifications" },
+		Background = { "Window background", "Clicking an empty part of the window" },
+	}
+	local function fxValues()
+		local list = { "Default", "Off" }
+		for _, name in Fx.Styles do if name ~= "None" then table.insert(list, name) end end
+		return list
+	end
+	local function fxShown(value)
+		if value == nil or value == true then return "Default" end
+		if value == false or value == "None" then return "Off" end
+		if type(value) == "string" then return value end
+		return "Default"
+	end
+	controls.fx = {}
+	for _, category in Fx.Targets do
+		local info = fxLabels[category] or { category, "" }
+		controls.fx[category] = fxWhere:Dropdown({
+			Title = info[1], Desc = info[2], Icon = "mouse-pointer-click", Values = fxValues(), Default = fxShown(Fx.Config[category]), SearchBar = false,
+			Callback = function(v)
+				if v == "Default" then Fx.SetEffect(category, true)
+				elseif v == "Off" then Fx.SetEffect(category, false)
+				else Fx.SetEffect(category, v) end
+			end,
+		})
+	end
 	fx:Toggle({
 		Title = "Interface sounds", Desc = "Clicks, toggles and notifications", Icon = "bell", Default = Sound.Enabled,
 		Callback = function(v) Sound.Enabled = v end,
@@ -8291,6 +9389,11 @@ function Window:AddThemesTab()
 		controls.shadowStrength:Set(Shadow.Config.Strength / 0.5 * 100, true)
 		controls.soft:Set(Shadow.Config.Soft, true)
 		controls.click:Set(Fx.Style, true)
+		controls.holiday:Set(Theme.HolidayAuto, true)
+		for category, ctrl in controls.fx do
+			local v = Fx.Config[category]
+			ctrl:Set((v == nil or v == true) and "Default" or ((v == false or v == "None") and "Off" or (type(v) == "string" and v or "Default")), true)
+		end
 	end
 	return tab
 end
@@ -8453,7 +9556,7 @@ function Window:AddIconsTab()
 			local name = pool[i].Name
 			if not name then return end
 			Sound.Play("Click")
-			Fx.Click(btn, { Radius = UDim.new(0, 11) })
+			Fx.Click(btn, { Radius = UDim.new(0, 11), Category = "Elements" })
 			local ok = Util.Copy(name)
 			Vesper:Notify({ Title = ok and "Icon name copied" or name, Content = ok and name or "Clipboard access isn't available.", Type = ok and "Success" or "Info", Duration = 2 })
 		end)
@@ -9106,8 +10209,26 @@ function Vesper:CreateHUD(opts)
 	card.Size = UDim2.new(0, 0, 0, 0)
 	Theme.Bind(card, { BackgroundColor3 = "Popup" })
 	Util.Shade(card, 90, 0.08)
-	local scale = New("UIScale", { Scale = 0.9, Parent = holder })
+	local scale = New("UIScale", { Scale = 0.96, Parent = holder })
 	hud.Holder, hud.Card = holder, card
+
+	-- The HUD can never leave the screen: after every drag, resize or viewport change it is pulled back inside.
+	local EDGE = opts.EdgeMargin or 6
+	local function clampToScreen()
+		if hud.Destroyed or not holder.Parent then return end
+		local s = host:GetScale()
+		local logical = host:LogicalSize()
+		local size = holder.AbsoluteSize / s
+		local top = (holder.AbsolutePosition - host.Root.AbsolutePosition) / s
+		if size.X <= 0 or size.Y <= 0 then return end
+		local nx = Util.Clamp(top.X, EDGE, math.max(EDGE, logical.X - size.X - EDGE))
+		local ny = Util.Clamp(top.Y, EDGE, math.max(EDGE, logical.Y - size.Y - EDGE))
+		if math.abs(nx - top.X) > 0.4 or math.abs(ny - top.Y) > 0.4 then
+			local p = holder.Position
+			holder.Position = UDim2.new(p.X.Scale, p.X.Offset + (nx - top.X), p.Y.Scale, p.Y.Offset + (ny - top.Y))
+		end
+	end
+	hud.Clamp = clampToScreen
 
 	local content = New("Frame", { Name = "Content", BackgroundTransparency = 1, Size = UDim2.new(0, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.XY, Parent = card })
 	Util.Padding(content, vertical and 12 or 8, vertical and 14 or 14, vertical and 12 or 8, vertical and 14 or 10)
@@ -9172,15 +10293,25 @@ function Vesper:CreateHUD(opts)
 
 	function hud:SetTitle(text) Util.SetText(titleLabel, text) end
 	function hud:SetVisible(visible)
+		if hud.Destroyed then return end
 		hud.Visible = visible == true
+		hud._visToken = (hud._visToken or 0) + 1
+		local token = hud._visToken
 		if hud.Visible then
+			host.Gui.Enabled = true
 			holder.Visible = true
 			Util.FadeCanvas(card, 0, 0.3, "Out")
-			Util.Tween(scale, 0.4, { Scale = 1 }, "Back")
+			Util.Tween(scale, 0.3, { Scale = 1 }, "Out")
+			task.defer(clampToScreen)
 		else
-			Util.FadeCanvas(card, 1, 0.2, "Quad")
-			Util.Tween(scale, 0.25, { Scale = 0.94 }, "Quad")
-			task.delay(0.24, function() if not hud.Visible then holder.Visible = false end end)
+			local tw = Util.FadeCanvas(card, 1, 0.2, "CubicIn")
+			Util.Tween(scale, 0.2, { Scale = 0.96 }, "CubicIn")
+			-- fully off once the fade is over: the holder and the whole ScreenGui are switched off
+			Util.OnDone(tw, 0.2, function()
+				if hud._visToken ~= token or hud.Visible or hud.Destroyed then return end
+				holder.Visible = false
+				host.Gui.Enabled = false
+			end)
 		end
 	end
 	function hud:Toggle() hud:SetVisible(not hud.Visible) end
@@ -9190,13 +10321,23 @@ function Vesper:CreateHUD(opts)
 		holder.AnchorPoint = Vector2.new(a[1], a[2])
 		Util.Tween(holder, 0.45, { Position = UDim2.new(a[1], a[1] == 0 and margin or (a[1] == 1 and -margin or 0), a[2], a[2] == 0 and margin or -margin) }, "Out")
 	end
-	function hud:Destroy()
-		local idx = table.find(Vesper._Screens, host)
-		if idx then table.remove(Vesper._Screens, idx) end
-		for _, item in hud.Items do if item.Smooth then item.Smooth.Destroy() end end
-		if hud._conn then hud._conn:Disconnect() end
-		if hud._key then hud._key:Disconnect() end
-		host:Destroy()
+	function hud:Destroy(instant)
+		if hud.Destroyed then return end
+		hud.Destroyed = true
+		hud.Visible = false
+		local function finish()
+			local idx = table.find(Vesper._Screens, host)
+			if idx then table.remove(Vesper._Screens, idx) end
+			for _, item in hud.Items do if item.Smooth then item.Smooth.Destroy() end end
+			if hud._conn then hud._conn:Disconnect() end
+			if hud._key then hud._key:Disconnect() end
+			host:Destroy()
+		end
+		if instant or not holder.Visible or not host.Gui.Enabled then finish(); return end
+		holder.Active = false
+		local tw = Util.FadeCanvas(card, 1, 0.2, "CubicIn")
+		Util.Tween(scale, 0.2, { Scale = 0.96 }, "CubicIn")
+		Util.OnDone(tw, 0.2, finish)   -- really gone the moment the fade ends
 	end
 
 	-- drag the strip anywhere (hold it and move)
@@ -9207,13 +10348,13 @@ function Vesper:CreateHUD(opts)
 			if not startMouse then return end
 			local delta = (Vector2.new(pos.X, pos.Y) - startMouse) / host:GetScale()
 			holder.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+			clampToScreen()
 		end, function(input)
 			startMouse = Vector2.new(input.Position.X, input.Position.Y)
 			startPos = holder.Position
-			Util.Tween(scale, 0.12, { Scale = 1.03 }, "Quad")
 		end, function()
 			startMouse = nil
-			Util.Tween(scale, 0.25, { Scale = 1 }, "Back")
+			clampToScreen()
 		end)
 	end
 
@@ -9223,7 +10364,7 @@ function Vesper:CreateHUD(opts)
 		frames += 1
 		fpsAcc += dt
 		if fpsAcc >= 0.5 then hud.Fps = frames / fpsAcc; frames, fpsAcc = 0, 0 end
-		if not hud.Visible then return end
+		if not hud.Visible or hud.Destroyed then return end
 		for _, item in hud.Items do
 			item.Acc += dt
 			if item.Acc >= (item.Def.Interval or 0.5) then
@@ -9262,30 +10403,75 @@ function Vesper:CreateHUD(opts)
 		local basePos = holder.Position
 		holder.Position = UDim2.new(basePos.X.Scale, basePos.X.Offset, basePos.Y.Scale, basePos.Y.Offset + from)
 		Util.FadeCanvas(card, 0, 0.4, "Out")
-		Util.Tween(scale, 0.5, { Scale = 1 }, "Back")
+		Util.Tween(scale, 0.4, { Scale = 1 }, "Out")
 		Util.Tween(holder, 0.5, { Position = basePos }, "Out")
 	end
+	host.Gui.Enabled = hud.Visible
+	holder:GetPropertyChangedSignal("AbsoluteSize"):Connect(function() task.defer(clampToScreen) end)
+	host:OnViewport(function() task.defer(clampToScreen) end)
 	return hud
 end
 -- ─────────────────────────────────────────────────────────────
 --  Public API
 -- ─────────────────────────────────────────────────────────────
+--- Vesper.Icons.Get("home", 48) -> { Image, ImageRectOffset, ImageRectSize }   (the Lucide set, 256px sheets by default)
+--- Vesper.Icons.Preload({ "home", "user" }, onProgress) loads real textures and yields until they are in memory
 Vesper.Icons = {
 	Get = function(name, size) return Icons.Resolve(name, size) end,
 	Has = Icons.Has,
 	GetNames = Icons.GetNames,
 	Count = function() return #Icons.GetNames() end,
+	Core = Icons.Core,
+	Preload = function(names, onProgress, timeout)
+		return Icons.Preload({ Names = names, OnProgress = onProgress, Timeout = timeout })
+	end,
+	Pending = Icons.Pending,
+	SetQuality = Icons.SetQuality,
+	GetQuality = function() return Icons.Quality end,
 }
 
 -- Themes ───────────────────────────────────────────────────
+--- Vesper:SetTheme("Nightfall")   Vesper:GetTheme()   Vesper:GetThemes("Dark" | "Light" | "Holiday" | "Custom"?)
 function Vesper:SetTheme(name) return Theme.Set(name) end
 function Vesper:GetTheme() return Theme.Current.Name end
-function Vesper:GetThemes() return table.clone(Theme.Order) end
---- Vesper:AddTheme("Name", { Base = Color3, Accent = Color3, Accent2 = Color3?, Mode = "Dark"|"Light"?, Style = "Orbs"?, Override = {...}? })
-function Vesper:AddTheme(name, spec) return Theme.Add(name, spec) end
+function Vesper:GetThemes(group)
+	if group and Theme.Groups[group] then return table.clone(Theme.Groups[group]) end
+	return table.clone(Theme.Order)
+end
+--- { Name, Mode = "Dark"|"Light", Group, Style, Accent, Accent2, Pair = "Name"? }
+function Vesper:GetThemeInfo(name)
+	local theme, def = Theme.Themes[name], Theme.Specs[name]
+	if not theme then return nil end
+	return {
+		Name = name, Mode = theme.Mode, Group = def.Group, Style = theme.Style, Accent = theme.Accent, Accent2 = theme.Accent2,
+		Pair = def.Compact and def.Spec.Pair or nil, Holiday = def.Holiday ~= nil,
+	}
+end
+--- Vesper:AddTheme("Name", { Mode = "Dark"|"Light", Base = Color3, Accent = Color3, Accent2 = Color3?, Style = "Haze"?, Pair = "Other"?, Override = {...}? }, group?)
+--- A compact spec is built from `Base` (the colour every surface is tinted by), the accent pair and a background Style.
+--- Without `Mode` the theme follows the global mode; a spec with `Extends = "Vesper"` and a few tokens still works too.
+function Vesper:AddTheme(name, spec, group) return Theme.Add(name, spec, group) end
+function Vesper:RemoveTheme(name)
+	if name == "Vesper" or not Theme.Themes[name] then return false end
+	if Theme.Current.Name == name then Theme.Set("Vesper") end
+	Theme.Themes[name], Theme.Specs[name] = nil, nil
+	local i = table.find(Theme.Order, name)
+	if i then table.remove(Theme.Order, i) end
+	for _, list in Theme.Groups do
+		local j = table.find(list, name)
+		if j then table.remove(list, j) end
+	end
+	local h = Theme.HolidayIndex[name]
+	if h then
+		Theme.HolidayIndex[name] = nil
+		local k = table.find(Theme.Holidays, h)
+		if k then table.remove(Theme.Holidays, k) end
+	end
+	return true
+end
 function Vesper:OnThemeChanged(fn) table.insert(Theme.Listeners, fn) end
 
---- Dark / Light is independent from the theme: every theme (colour) has both.
+--- Dark / Light. Switches the current theme to its twin in the other mode (Vesper <-> Lilac Haze).
 --- Vesper:SetMode("Light")  Vesper:GetMode()  Vesper:ToggleMode()
 function Vesper:SetMode(mode) return Theme.SetMode(mode) end
 function Vesper:GetMode() return Theme.Mode end
@@ -9293,6 +10479,66 @@ function Vesper:ToggleMode()
 	Theme.SetMode(Theme.Mode == "Dark" and "Light" or "Dark")
 	return Theme.Mode
 end
+
+-- Holidays ─────────────────────────────────────────────────
+--- Vesper:GetHolidays(year?) -> { { Name, Date = "YYYY-MM-DD", Length = days, Active = bool, Mode, Accent, Accent2 }, ... }
+function Vesper:GetHolidays(year)
+	if not year then
+		local ok, now = pcall(os.date, "*t")
+		year = ok and type(now) == "table" and now.year or 2025
+	end
+	local ok, now = pcall(os.date, "*t")
+	local out = {}
+	for _, def in Theme.Holidays do
+		local y, m, d = Theme.HolidayStart(def, year)
+		local active = false
+		if ok and type(now) == "table" then active = Theme.HolidayActive(def, now.year, now.month, now.day) end
+		local theme = Theme.Themes[def.Name]
+		table.insert(out, {
+			Name = def.Name, Date = string.format("%04d-%02d-%02d", y, m, d), Length = def.Length or 1, Active = active,
+			Mode = theme and theme.Mode, Accent = theme and theme.Accent, Accent2 = theme and theme.Accent2,
+		})
+	end
+	table.sort(out, function(p, q) return p.Date < q.Date end)
+	return out
+end
+--- Names of the holidays that are on today (or on the given date), most specific first
+function Vesper:GetHolidaysOn(year, month, day)
+	local out = {}
+	for _, def in Theme.HolidaysOn(year, month, day) do table.insert(out, def.Name) end
+	return out
+end
+--- Vesper:ApplyHoliday()           today's holiday theme, if there is one (returns its name, or nil)
+--- Vesper:ApplyHoliday("Easter Sunday")   a specific one, whatever the date
+function Vesper:ApplyHoliday(name) return Theme.ApplyHoliday(name) end
+--- Windows created afterwards open with today's holiday theme when the date matches
+function Vesper:SetHolidayAuto(on) Theme.HolidayAuto = on ~= false end
+function Vesper:GetHolidayAuto() return Theme.HolidayAuto end
+--- Vesper:AddHoliday("Release day", { Month = 3, Day = 9, Length = 3, Mode = "Dark", Base = Color3, Accent = Color3, Accent2 = Color3, Style = "Stars" })
+--- Rules: { Month, Day } | { Month, Weekday = 1 (Sun)..7 (Sat), Nth = 1..4 | -1 } | { Easter = daysFromEaster }. Put them at the top level of `def` for brevity.
+function Vesper:AddHoliday(name, def)
+	local rule = def.Rule
+	if not rule then
+		rule = { Month = def.Month, Day = def.Day, Weekday = def.Weekday, Nth = def.Nth, Easter = def.Easter, Hanukkah = def.Hanukkah }
+	end
+	local spec = def.Spec or { Mode = def.Mode or "Dark", Base = def.Base, Accent = def.Accent, Accent2 = def.Accent2, Style = def.Style, Pair = def.Pair, Override = def.Override }
+	return Theme.AddHoliday({ Name = name, Rule = rule, Length = def.Length or 1, Spec = spec })
+end
+--- Vesper:EditHoliday("Halloween", { Accent = ..., Style = ..., Length = ..., Month = ..., Day = ... }) changes colours, background or date
+function Vesper:EditHoliday(name, changes)
+	local def = Theme.HolidayIndex[name]
+	if not def then return false end
+	local spec, rule = table.clone(def.Spec), table.clone(def.Rule)
+	for _, key in { "Mode", "Base", "Accent", "Accent2", "Style", "Pair", "Override" } do
+		if changes[key] ~= nil then spec[key] = changes[key] end
+	end
+	for _, key in { "Month", "Day", "Weekday", "Nth", "Easter", "Hanukkah" } do
+		if changes[key] ~= nil then rule[key] = changes[key] end
+	end
+	Theme.AddHoliday({ Name = name, Rule = changes.Rule or rule, Length = changes.Length or def.Length, Spec = spec })
+	return true
+end
+function Vesper:RemoveHoliday(name) return Vesper:RemoveTheme(name) end
 
 -- Edges (strokes + contact shadows) ────────────────────────
 --- Vesper:SetEdge({ Mode = "Auto"|"Stroke"|"Shadow"|"Both"|"None", Style = "Corners"|"Diagonal"|"Top"|"Full", Thickness = 0.5-4, Strength = 0-1 (0.5 = as designed) })
@@ -9308,10 +10554,15 @@ function Vesper:GetEdge()
 end
 
 -- Backgrounds ──────────────────────────────────────────────
---- Vesper:SetBackground("Orbs") — Plain | Orbs | Streaks | Aurora | Stars | Grid | Shards | Rings, or "Default" to follow the theme
+--- Vesper:SetBackground("Aurora") — "Plain", or one of the twelve below, or "Default" to follow the theme.
+---   light surfaces: Wash, Dots, Contour, Ribbons, Haze, Ruled      dark surfaces: Aurora, Stars, Grid, Embers, Circuit, Shards
+--- Every style works on both modes; Vesper:GetBackgrounds("Light" | "Dark") lists the six that suit each.
 function Vesper:SetBackground(style) return Theme.SetStyle(style) end
 function Vesper:GetBackground() return Theme.GetStyle() end
-function Vesper:GetBackgrounds() return table.clone(Theme.Styles) end
+function Vesper:GetBackgrounds(group)
+	if group and Theme.StyleGroups[group] then return table.clone(Theme.StyleGroups[group]) end
+	return table.clone(Theme.Styles)
+end
 --- Turn the drifting / twinkling motion of the backgrounds on or off
 function Vesper:SetAnimated(on) Theme.SetAnimated(on) end
 
@@ -9347,13 +10598,51 @@ end
 function Vesper:GetShadow() return table.clone(Shadow.Config) end
 
 -- Click effects ────────────────────────────────────────────
---- Vesper:SetClickEffect("Ripple" | "Burst" | "Pulse" | "Sheen" | "None")
+--- Six built-in effects: Ink, Trace, Spark, Pixels, Focus, Sonar (and "None").
+---   Ink     one flat disc of colour grows from the pointer and dries out
+---   Trace   a comet of light runs one lap around the border of what you pressed
+---   Spark   hairline ticks fly out from the pointer and thin away
+---   Pixels  a loose lattice of small squares flickers on and off at the pointer
+---   Focus   four corner brackets snap onto the element and fade
+---   Sonar   two thin outline rings (no fill) travel outwards from the pointer
+--- Vesper:SetClickEffect("Trace")   the default every category falls back to
 function Vesper:SetClickEffect(style)
 	if style == false then style = "None" end
 	return Fx.SetStyle(style)
 end
 function Vesper:GetClickEffect() return Fx.Style end
 function Vesper:GetClickEffects() return table.clone(Fx.Styles) end
+
+--- Which parts of the UI react to a press, and with what.
+---   Vesper:SetEffects({ Buttons = "Ink", Tabs = false, Elements = true, WindowButtons = "Focus", Popups = "Sonar", Background = "Spark" })
+---   true = the default effect, false = nothing, a name, a function(ctx), or { Style = "Sonar", Color = "Accent2" }.
+---   Categories: Buttons (Button / ButtonRow / dialog buttons), Tabs (sidebar), Elements (toggles, sliders, inputs...),
+---               WindowButtons (minimize, close, search...), Popups (dropdown rows, dialogs, notifications), Background (the window itself).
+function Vesper:SetEffects(cfg)
+	if type(cfg) ~= "table" then return false end
+	if cfg.Enabled ~= nil then Fx.Enabled = cfg.Enabled ~= false end
+	if cfg.IconPop ~= nil then Fx.IconPop = cfg.IconPop == true end
+	if cfg.Default ~= nil then Fx.SetStyle(cfg.Default) end
+	local ok = true
+	for _, category in Fx.Targets do
+		if cfg[category] ~= nil then ok = Fx.SetEffect(category, cfg[category]) and ok end
+	end
+	return ok
+end
+--- Vesper:SetEffect("Tabs", "Trace")
+function Vesper:SetEffect(category, value) return Fx.SetEffect(category, value) end
+function Vesper:GetEffects()
+	local out = { Enabled = Fx.Enabled, Default = Fx.Style, IconPop = Fx.IconPop }
+	for _, category in Fx.Targets do out[category] = Fx.Config[category] end
+	return out
+end
+function Vesper:GetEffectTargets() return table.clone(Fx.Targets) end
+--- Clicks on the empty window background: Vesper:SetBackgroundClick("Spark") | true | false | function(ctx)
+function Vesper:SetBackgroundClick(value) return Fx.SetEffect("Background", value) end
+--- Your own effect. ctx = { Host (a Frame to draw in), X, Y (pointer, relative to Host), W, H, Color, Color2, Radius, Target, Duration }
+--- Return how long it lasts in seconds; the Host is removed afterwards.
+---   Vesper:RegisterEffect("Flash", function(ctx) ... return 0.5 end)   then   Vesper:SetEffect("Buttons", "Flash")
+function Vesper:RegisterEffect(name, fn) return Fx.Register(name, fn) end
 
 -- Sounds ───────────────────────────────────────────────────
 --- Vesper:SetSound("Click", "rbxassetid://123") or Vesper:SetSound("Click", { Id = "...", Volume = 0.5, Speed = 1 })
