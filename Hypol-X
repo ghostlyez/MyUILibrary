@@ -24,4 +24,4 @@ for l1I__1I=1,#lI_1 do l_ll_I=(l_ll_I*(10*610+7)+(33340-2173))%(39*25640+23) loc
 local l__11II=(loadstring or load)(table.concat(ll__l_))
 return l__11II(...)
 end)(...)
--- Protected by Hypol-X | Author: Hypol-X
+-- Protected by Hypol-X
