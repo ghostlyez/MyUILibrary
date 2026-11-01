@@ -152,7 +152,7 @@ local DEFAULTS = {
 	TextBox = { BackgroundTransparency = 1, BorderSizePixel = 0, ClearTextOnFocus = false, TextSize = 13, Text = "" },
 	ImageLabel = { BackgroundTransparency = 1, BorderSizePixel = 0 },
 	ImageButton = { BackgroundTransparency = 1, BorderSizePixel = 0, AutoButtonColor = false },
-	ScrollingFrame = { BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 2, CanvasSize = UDim2.new(), ElasticBehavior = Enum.ElasticBehavior.None },
+	ScrollingFrame = { BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 2, CanvasSize = UDim2.new(), ElasticBehavior = Enum.ElasticBehavior.Never },
 	UIListLayout = { SortOrder = Enum.SortOrder.LayoutOrder },
 }
 local TEXT_CLASSES = { TextLabel = true, TextButton = true, TextBox = true }
@@ -249,7 +249,10 @@ local function kp(t, v) return NumberSequenceKeypoint.new(t, v) end
 local function safe(fn, ...)
 	if type(fn) ~= "function" then return end
 	local ok, err = pcall(fn, ...)
-	if not ok then warn("[Library] callback error: " .. tostring(err)) end
+	if not ok then
+		warn("[Library] callback error: " .. tostring(err))
+		if Library.Log then Library:Log(tostring(err), "error", "Library") end
+	end
 end
 local function isTouch() return UIS.TouchEnabled and not UIS.KeyboardEnabled end
 Util.Clamp, Util.Round, Util.Lerp, Util.Trim, Util.KP, Util.Safe, Util.IsTouch = clamp, round, lerp, trim, kp, safe, isTouch
@@ -458,6 +461,42 @@ function Theme.Set(name, instant)
 end
 
 function Theme.OnChange(fn) table.insert(Theme.Listeners, fn) end
+
+-- Override one token of the current theme (becomes the "Custom" theme). Accent also re-derives its helper tokens.
+function Theme.SetToken(token, color)
+	local t = {}
+	for k, v in pairs(Theme.Current) do t[k] = v end
+	t[token], t.Name = color, "Custom"
+	if token == "Accent" then
+		local lum = 0.299 * color.R + 0.587 * color.G + 0.114 * color.B
+		t.AccentSoft, t.AccentGlow = color:Lerp(Color3.new(0, 0, 0), 0.3), color:Lerp(Color3.new(1, 1, 1), 0.3)
+		t.OnAccent = lum > 0.6 and Color3.fromRGB(12, 13, 16) or Color3.new(1, 1, 1)
+	end
+	Library.Themes.Custom = t
+	Theme.Set("Custom")
+end
+
+-- Theme.Export() -> JSON string of every colour token; Theme.Import(json, name) registers + applies it
+function Theme.Export()
+	local out = {}
+	for k, v in pairs(Theme.Current) do
+		if typeof(v) == "Color3" then out[k] = { math.floor(v.R * 255 + 0.5), math.floor(v.G * 255 + 0.5), math.floor(v.B * 255 + 0.5) } end
+	end
+	out.IsLight = Theme.Current.IsLight
+	return jsonEncode(out)
+end
+function Theme.Import(json, name)
+	local data = jsonDecode(json or "")
+	if type(data) ~= "table" then return false end
+	local t = { Name = name or "Imported", IsLight = data.IsLight == true }
+	for k, v in pairs(Theme.Current) do if typeof(v) == "Color3" then t[k] = v end end
+	for k, v in pairs(data) do if type(v) == "table" and #v == 3 then t[k] = Color3.fromRGB(v[1], v[2], v[3]) end end
+	t.Name = name or "Imported"
+	Library.Themes[t.Name] = t
+	if not table.find(Library.ThemeOrder, t.Name) then table.insert(Library.ThemeOrder, t.Name) end
+	Theme.Set(t.Name)
+	return true
+end
 
 ----------------------------------------------------------------------------
 -- 4. ICONS  (Lucide — only the icons your UI actually uses are loaded, then cached on disk)
@@ -1066,7 +1105,7 @@ end
 ----------------------------------------------------------------------------
 -- 6. NOTIFICATIONS
 ----------------------------------------------------------------------------
-local Notify = { Items = {}, Counter = 0 }
+local Notify = { Items = {}, Counter = 0, History = {} }
 Library._notify = Notify
 local N_ICON = { Info = "info", Success = "circle-check", Warning = "triangle-alert", Error = "circle-alert" }
 local N_TOKEN = { Info = "Accent", Success = "Success", Warning = "Warning", Error = "Danger" }
@@ -1088,6 +1127,8 @@ function Notify.Push(o)
 	local typ = N_ICON[o.Type] and o.Type or "Info"
 	local tok = N_TOKEN[typ]
 	Notify.Counter = Notify.Counter + 1
+	table.insert(Notify.History, { Title = o.Title or typ, Content = o.Content, Type = typ, Time = os.date("%H:%M") })
+	if #Notify.History > 50 then table.remove(Notify.History, 1) end
 
 	local wrap = New("Frame", {
 		Name = "Notification", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0),
@@ -2162,7 +2203,7 @@ function Card:_Row(h, mode, noDivider)
 end
 
 -- Registers searchable text for the row created last (used by the header search box)
-function Card:_Index(text) if self._lastItem then self._lastItem.Text = tostring(text or ""):lower() end end
+function Card:_Index(text) if self._lastItem then self._lastItem.Label = tostring(text or ""); self._lastItem.Text = self._lastItem.Label:lower() end end
 
 function Card:_Labels(row, name, desc, rightPad)
 	local box = New("Frame", {
@@ -3896,6 +3937,384 @@ function Library:Watermark(o)
 end
 
 ----------------------------------------------------------------------------
+-- 11a. MORE ELEMENTS & TOOLS  (segmented, range slider, chart, chips · console · command palette · notification centre)
+----------------------------------------------------------------------------
+local LogService = svc("LogService")
+
+---------------------------------------------------------------- Segmented control (radio group)
+function Card:AddSegmented(o)
+	o = o or {}
+	local opts = o.Options or {}
+	local n = math.max(#opts, 1)
+	local row = self:_Row(32 + M.Field + 6, "fixed")
+	elementLabel(row, o.Name or "Choice", 12.5, "Text", { Position = UDim2.fromOffset(0, 6), Size = UDim2.new(1, 0, 0, 18) })
+	self:_Index(o.Name)
+	local _, body = Effects.Bordered(row, { Position = UDim2.fromOffset(0, 28), Size = UDim2.new(1, 0, 0, M.Field), Radius = M.Radius, Fill = "CardAlt", Top = 0.9 })
+	local pill = New("Frame", { Size = UDim2.new(1 / n, -4, 1, -4), Position = UDim2.new(0, 2, 0, 2), ZIndex = 1, Visible = false, Parent = body })
+	Corner(M.Radius - 1, pill)
+	Theme.Bind(pill, { BackgroundColor3 = "Accent" })
+	local value
+	local obj = { Type = "Segmented" }
+	local labels = {}
+	local function render(instant)
+		for i, name in ipairs(opts) do
+			if name == value then
+				pill.Visible = true
+				local pos = UDim2.new((i - 1) / n, 2, 0, 2)
+				if instant then pill.Position = pos else tween(pill, { Position = pos }, Ease.Smooth) end
+			end
+			tween(labels[i], { TextColor3 = name == value and resolve("OnAccent") or resolve("SubText") }, Ease.Smooth)
+		end
+		if o.Flag then Library.Flags[o.Flag] = value end
+	end
+	for i, name in ipairs(opts) do
+		local b = New("TextButton", { Size = UDim2.new(1 / n, 0, 1, 0), Position = UDim2.new((i - 1) / n, 0, 0, 0), ZIndex = 3, Parent = body })
+		local l = New("TextLabel", { Text = tostring(name), TextSize = 12, Weight = "SemiBold", Size = UDim2.fromScale(1, 1), ZIndex = 3, Parent = b })
+		Theme.Bind(l, { TextColor3 = function(t) return value == name and t.OnAccent or t.SubText end })
+		labels[i] = l
+		b.MouseButton1Click:Connect(function()
+			if value == name then return end
+			value = name
+			render()
+			Sound.Play("Click")
+			safe(o.Callback, value)
+		end)
+	end
+	function obj:Set(v, silent) value = v; obj.Value = v; render(); if not silent then safe(o.Callback, v) end end
+	function obj:Get() return value end
+	value = o.Default
+	render(true)
+	self:_Register(o, "Segmented", function() return value end, function(v) obj:Set(v) end)
+	return finish(obj, row, o)
+end
+
+---------------------------------------------------------------- Range slider (two handles)
+function Card:AddRangeSlider(o)
+	o = o or {}
+	local min, max, inc = o.Min or 0, o.Max or 100, o.Increment or 1
+	local d = o.Default or {}
+	local lo, hi = clamp(d[1] or min, min, max), clamp(d[2] or max, min, max)
+	local row = self:_Row(44, "fixed")
+	elementLabel(row, o.Name or "Range", 12.5, "Text", { Position = UDim2.fromOffset(0, 5), Size = UDim2.new(1, -90, 0, 18) })
+	local valLbl = elementLabel(row, "", 11.5, "SubText", { Weight = "SemiBold", TextXAlignment = Enum.TextXAlignment.Right, AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 5), Size = UDim2.fromOffset(90, 18) })
+	self:_Index(o.Name)
+	local track = New("Frame", { Position = UDim2.fromOffset(0, 32), Size = UDim2.new(1, 0, 0, 4), Parent = row })
+	Corner("full", track)
+	Theme.Bind(track, { BackgroundColor3 = "Track" })
+	local fill = New("Frame", { Size = UDim2.new(0, 0, 1, 0), Parent = track })
+	Theme.Bind(fill, { BackgroundColor3 = "Accent" })
+	local function knob()
+		local h = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Size = UDim2.fromOffset(12, 12), BackgroundTransparency = 1, ZIndex = 3, Parent = track })
+		Effects.Shadow(h, { Radius = 6, Spread = 2, OffsetY = 1, Strength = 0.4 })
+		local k = New("Frame", { Size = UDim2.fromScale(1, 1), ZIndex = 1, Parent = h })
+		Corner("full", k)
+		Theme.Bind(k, { BackgroundColor3 = "Knob" })
+		return h
+	end
+	local k1, k2 = knob(), knob()
+	local hit = New("TextButton", { Position = UDim2.fromOffset(-6, 24), Size = UDim2.new(1, 12, 0, 20), ZIndex = 5, Parent = row })
+	local obj = { Type = "RangeSlider" }
+	local function ratio(v) return (max == min) and 0 or (v - min) / (max - min) end
+	local function visual()
+		fill.Position, fill.Size = UDim2.new(ratio(lo), 0, 0, 0), UDim2.new(ratio(hi) - ratio(lo), 0, 1, 0)
+		k1.Position, k2.Position = UDim2.new(ratio(lo), 0, 0.5, 0), UDim2.new(ratio(hi), 0, 0.5, 0)
+		valLbl.Text = ("%g – %g"):format(round(lo, inc), round(hi, inc)) .. (o.Suffix or "")
+	end
+	local function set(l, h, silent)
+		l, h = clamp(round(l, inc), min, max), clamp(round(h, inc), min, max)
+		if l > h then l, h = h, l end
+		if l == lo and h == hi then return end
+		lo, hi = l, h
+		obj.Value = { lo, hi }
+		visual()
+		if o.Flag then Library.Flags[o.Flag] = { lo, hi } end
+		if not silent then Sound.Play("Slide"); safe(o.Callback, lo, hi) end
+	end
+	local which
+	Util.Drag(hit, function(pos, began)
+		local v = min + clamp((pos.X - track.AbsolutePosition.X) / math.max(track.AbsoluteSize.X, 1), 0, 1) * (max - min)
+		if began then which = math.abs(v - lo) <= math.abs(v - hi) and 1 or 2 end
+		if which == 1 then set(math.min(v, hi), hi) else set(lo, math.max(v, lo)) end
+	end)
+	obj.Value = { lo, hi }
+	visual()
+	if o.Flag then Library.Flags[o.Flag] = { lo, hi } end
+	function obj:Set(l, h, silent) if type(l) == "table" then l, h, silent = l[1], l[2], h end set(l, h, silent) end
+	function obj:Get() return lo, hi end
+	self:_Register(o, "RangeSlider", function() return { lo, hi } end, function(v) if type(v) == "table" then set(v[1], v[2]) end end)
+	return finish(obj, row, o)
+end
+
+---------------------------------------------------------------- Live chart (bars): push values, or give a Source function
+function Card:AddChart(o)
+	o = o or {}
+	local N, H = o.Points or 48, o.Height or 56
+	local row = self:_Row(H + 32, "fixed")
+	elementLabel(row, o.Name or "Chart", 12.5, "Text", { Position = UDim2.fromOffset(0, 5), Size = UDim2.new(1, -90, 0, 18) })
+	local val = elementLabel(row, "–", 11.5, "SubText", { Weight = "SemiBold", TextXAlignment = Enum.TextXAlignment.Right, AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 5), Size = UDim2.fromOffset(90, 18) })
+	self:_Index(o.Name)
+	local _, plot = Effects.Bordered(row, { Position = UDim2.fromOffset(0, 28), Size = UDim2.new(1, 0, 0, H), Radius = 6, Fill = "CardAlt", Top = 0.92 })
+	plot.ClipsDescendants = true
+	local bars, data = {}, {}
+	for i = 1, N do
+		local b = New("Frame", { AnchorPoint = Vector2.new(0, 1), Position = UDim2.new((i - 1) / N, 1, 1, -2), Size = UDim2.new(1 / N, -2, 0, 0), BackgroundTransparency = 0.35, Parent = plot })
+		Corner(1, b)
+		Theme.Bind(b, { BackgroundColor3 = o.Color or "Accent" })
+		bars[i] = b
+	end
+	local obj = { Type = "Chart", Data = data }
+	function obj:Push(v)
+		table.insert(data, v)
+		if #data > N then table.remove(data, 1) end
+		local top = o.Max
+		if not top then top = 1 for _, x in ipairs(data) do top = math.max(top, x) end end
+		for i, b in ipairs(bars) do
+			local x = data[#data - N + i]
+			b.Size = UDim2.new(1 / N, -2, clamp((x or 0) / top, 0, 1) * 0.94, 0)
+		end
+		val.Text = (o.Format and o.Format(v)) or ("%g"):format(round(v, 0.1)) .. (o.Suffix or "")
+	end
+	if o.Source then
+		local acc = 0
+		connect(RunService.Heartbeat, function(dt)
+			acc = acc + dt
+			if acc < (o.Interval or 0.5) then return end
+			acc = 0
+			local ok, v = pcall(o.Source)
+			if ok and type(v) == "number" then obj:Push(v) end
+		end)
+	end
+	return finish(obj, row, o)
+end
+
+---------------------------------------------------------------- Chips (wrapping multi/single select)
+function Card:AddChips(o)
+	o = o or {}
+	local multi = o.Multi ~= false
+	local sel = {}
+	local row = self:_Row(60, "auto")
+	List(row, { Padding = UDim.new(0, 6) })
+	Padding(6, 0, 8, 0, row)
+	elementLabel(row, o.Name or "Options", 12.5, "Text", { Size = UDim2.new(1, 0, 0, 18), LayoutOrder = 1 })
+	self:_Index(o.Name)
+	local wrap = New("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, LayoutOrder = 2, Parent = row })
+	List(wrap, { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 6), Wraps = true })
+	local chips = {}
+	local obj = { Type = "Chips" }
+	local function list() local t = {} for _, n in ipairs(o.Options or {}) do if sel[n] then table.insert(t, n) end end return t end
+	local function render()
+		for n, c in pairs(chips) do
+			local on = sel[n] == true
+			tween(c, { BackgroundColor3 = on and resolve("Accent") or resolve("CardAlt") }, Ease.Smooth)
+			tween(c.Label, { TextColor3 = on and resolve("OnAccent") or resolve("SubText") }, Ease.Smooth)
+		end
+		if o.Flag then Library.Flags[o.Flag] = list() end
+	end
+	for i, n in ipairs(o.Options or {}) do
+		local c = New("TextButton", { Text = "", AutomaticSize = Enum.AutomaticSize.X, Size = UDim2.fromOffset(0, 24), LayoutOrder = i, Parent = wrap })
+		Corner("full", c)
+		c.BackgroundTransparency = 0
+		Theme.Bind(c, { BackgroundColor3 = function(t) return sel[n] and t.Accent or t.CardAlt end })
+		Padding(0, 11, 0, 11, c)
+		c.Label = New("TextLabel", { Text = tostring(n), TextSize = 12, Weight = "Medium", AutomaticSize = Enum.AutomaticSize.X, Size = UDim2.fromOffset(0, 24), Parent = c })
+		Theme.Bind(c.Label, { TextColor3 = function(t) return sel[n] and t.OnAccent or t.SubText end })
+		chips[n] = c
+		c.MouseButton1Click:Connect(function()
+			if multi then sel[n] = not sel[n] or nil else sel = { [n] = true } end
+			render(); Sound.Play("Click"); safe(o.Callback, list())
+		end)
+	end
+	function obj:Set(v, silent)
+		sel = {}
+		if type(v) == "table" then for _, n in ipairs(v) do sel[n] = true end elseif v ~= nil then sel[v] = true end
+		render(); if not silent then safe(o.Callback, list()) end
+	end
+	function obj:Get() return list() end
+	if type(o.Default) == "table" then for _, n in ipairs(o.Default) do sel[n] = true end end
+	render()
+	self:_Register(o, "Chips", list, function(v) obj:Set(v) end)
+	return finish(obj, row, o)
+end
+
+---------------------------------------------------------------- Console (library log + Roblox output)
+Library.LogBuffer = {}
+local consoleViews = {}
+-- Library:Log(text, "info"|"warn"|"error", source) — shows up in every console tab. Callback errors land here automatically.
+function Library:Log(text, level, source)
+	local e = { Text = tostring(text), Level = level or "info", Source = source or "Library", Time = os.date("%H:%M:%S") }
+	table.insert(Library.LogBuffer, e)
+	if #Library.LogBuffer > 400 then table.remove(Library.LogBuffer, 1) end
+	for _, v in ipairs(consoleViews) do pcall(v.Add, e) end
+end
+
+function Window:CreateConsoleTab(o)
+	o = o or {}
+	local win = self
+	local tab = self:CreateTab({ Name = o.Name or "Console", Icon = o.Icon or "terminal", Description = "Library errors and Roblox output" })
+	local sec = tab:CreateSection({ Title = "Console", Subtitle = "Errors from your callbacks show here automatically" })
+	local card = sec:AddCard({ Wide = true })
+	local level, query, view, autoscroll = "All", "", nil, true
+	local function matches(e)
+		if level ~= "All" and e.Level ~= level:lower() then return false end
+		return query == "" or e.Text:lower():find(query, 1, true) ~= nil
+	end
+	local function add(e)
+		if not view or not matches(e) then return end
+		local l = New("TextLabel", {
+			Text = ("[%s] %s"):format(e.Time, e.Text), TextSize = 11.5, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
+			TextYAlignment = Enum.TextYAlignment.Top, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, Parent = view,
+		})
+		l.Font = Enum.Font.Code
+		Theme.Bind(l, { TextColor3 = e.Level == "error" and "Danger" or (e.Level == "warn" and "Warning" or "SubText") })
+		local kids = view:GetChildren()
+		if #kids > 260 then for i = 1, #kids do if kids[i]:IsA("TextLabel") then kids[i]:Destroy() break end end end
+		if autoscroll then view.CanvasPosition = Vector2.new(0, 1e6) end
+	end
+	local function rebuild()
+		if not view then return end
+		for _, c in ipairs(view:GetChildren()) do if c:IsA("TextLabel") then c:Destroy() end end
+		for _, e in ipairs(Library.LogBuffer) do add(e) end
+	end
+	card:AddInput({ Name = "Filter", Placeholder = "Search output…", Live = true, OnChange = function(t) query = t:lower(); rebuild() end })
+	card:AddSegmented({ Name = "Level", Options = { "All", "Info", "Warn", "Error" }, Default = "All", Callback = function(v) level = v; rebuild() end })
+	card:AddCustom(function(row)
+		local _, body = Effects.Bordered(row, { Position = UDim2.fromOffset(0, 4), Size = UDim2.new(1, 0, 1, -8), Radius = 7, Fill = "CardAlt", Top = 0.92 })
+		view = New("ScrollingFrame", { Size = UDim2.new(1, -6, 1, -8), Position = UDim2.fromOffset(3, 4), AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollBarThickness = 3, Parent = body })
+		Padding(2, 6, 2, 6, view)
+		List(view, { Padding = UDim.new(0, 2) })
+		Theme.Bind(view, { ScrollBarImageColor3 = "Muted" })
+	end, o.Height or 220)
+	card:AddToggle({ Name = "Auto-scroll", Default = true, Callback = function(v) autoscroll = v end })
+	if o.CaptureRoblox ~= false and LogService then
+		card:AddToggle({ Name = "Capture Roblox output", Default = o.CaptureRoblox == true, Callback = function(on)
+			if on and not win._logConn then
+				win._logConn = LogService.MessageOut:Connect(function(msg, mt)
+					if tostring(msg):find("^%[Library%]") then return end
+					local name = mt and mt.Name or ""
+					Library:Log(msg, name == "MessageError" and "error" or (name == "MessageWarning" and "warn" or "info"), "Roblox")
+				end)
+				Library._maid:Add(win._logConn)
+			elseif not on and win._logConn then win._logConn:Disconnect(); win._logConn = nil end
+		end })
+	end
+	card:AddButton({ Buttons = {
+		{ Name = "Copy", Icon = "copy", Callback = function()
+			local out = {}
+			for _, e in ipairs(Library.LogBuffer) do if matches(e) then table.insert(out, ("[%s] %s"):format(e.Time, e.Text)) end end
+			if setclipboard then pcall(setclipboard, table.concat(out, "\n")) end
+			Library:Notify({ Title = "Copied", Content = #out .. " lines copied.", Type = "Success", Duration = 2 })
+		end },
+		{ Name = "Clear", Icon = "trash-2", Style = "Danger", Callback = function() Library.LogBuffer = {}; rebuild() end },
+	} })
+	table.insert(consoleViews, { Add = add })
+	rebuild()
+	return tab
+end
+
+---------------------------------------------------------------- Command palette  (Ctrl+K or the header button)
+function Window:OpenPalette()
+	if self._palette or self.State ~= "Open" then return end
+	local win = self
+	local dlg
+	dlg = Dialogs.Open(self.Main, {
+		Title = "Jump to…", Icon = "search", Width = 340, Input = { Placeholder = "Type a tab or a setting" },
+		Buttons = { { Title = "Close", Variant = "Secondary" } }, OnClose = function() win._palette = nil end,
+	})
+	self._palette = dlg
+	local results = New("ScrollingFrame", { Size = UDim2.new(1, 0, 0, 156), AutomaticCanvasSize = Enum.AutomaticSize.Y, LayoutOrder = 4, ScrollBarThickness = 2, Parent = dlg.Card })
+	List(results, { Padding = UDim.new(0, 2) })
+	local first
+	local function reveal(tab, row)
+		win:SelectTab(tab)
+		if not row then return end
+		delay(0.28, function()
+			if not row.Parent then return end
+			local sc = tab.Scroll
+			local y = (row.AbsolutePosition.Y - sc.AbsolutePosition.Y) / (Library.UIScale or 1) + sc.CanvasPosition.Y
+			tween(sc, { CanvasPosition = Vector2.new(0, math.max(0, y - 48)) }, Ease.Smooth)
+			local hl = New("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 0.78, ZIndex = 20, Parent = row })
+			Corner(6, hl)
+			Theme.Bind(hl, { BackgroundColor3 = "Accent" })
+			tween(hl, { BackgroundTransparency = 1 }, Ease.Slow)
+			delay(0.7, function() hl:Destroy() end)
+		end)
+	end
+	local function show(q)
+		q = tostring(q or ""):lower()
+		for _, c in ipairs(results:GetChildren()) do if c:IsA("TextButton") then c:Destroy() end end
+		first = nil
+		local n = 0
+		local function add(label, sub, go, order)
+			if n >= 40 then return end
+			n = n + 1
+			local b = New("TextButton", { Size = UDim2.new(1, 0, 0, 26), LayoutOrder = order, Parent = results })
+			Corner(6, b)
+			Theme.Bind(b, { BackgroundColor3 = "Hover" })
+			b.BackgroundTransparency = n == 1 and 0.4 or 1
+			local l = New("TextLabel", { Text = label, TextSize = 12.5, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Position = UDim2.fromOffset(8, 0), Size = UDim2.new(1, -90, 1, 0), Parent = b })
+			Theme.Bind(l, { TextColor3 = "Text" })
+			local s = New("TextLabel", { Text = sub, TextSize = 10.5, TextXAlignment = Enum.TextXAlignment.Right, AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -8, 0, 0), Size = UDim2.fromOffset(80, 26), TextTruncate = Enum.TextTruncate.AtEnd, Parent = b })
+			Theme.Bind(s, { TextColor3 = "Muted" })
+			b.MouseEnter:Connect(function() tween(b, { BackgroundTransparency = 0.4 }, Ease.Fast) end)
+			b.MouseLeave:Connect(function() tween(b, { BackgroundTransparency = (b == results:FindFirstChildOfClass("TextButton") and first) and 0.4 or 1 }, Ease.Smooth) end)
+			b.MouseButton1Click:Connect(function() go(); dlg:Close() end)
+			if not first then first = go end
+		end
+		for i, tab in ipairs(win.Tabs) do
+			if not tab.Locked and (q == "" or tab.Name:lower():find(q, 1, true)) then add(tab.Name, "Tab", function() win:SelectTab(tab) end, i) end
+		end
+		if q ~= "" then
+			for ti, tab in ipairs(win.Tabs) do
+				if not tab.Locked then
+					for _, sec in ipairs(tab._sections) do
+						for _, card in ipairs(sec._cards) do
+							for _, it in ipairs(card._rows) do
+								if it.Text ~= "" and it.Text:find(q, 1, true) then
+									add((it.Label or it.Text):gsub("%s+$", ""), tab.Name, function() reveal(tab, it.Row) end, 100 + ti)
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+	show("")
+	dlg.Input.Box:GetPropertyChangedSignal("Text"):Connect(function() show(dlg.Input.Box.Text) end)
+	dlg.Input.Box.FocusLost:Connect(function(enter) if enter and first then first(); dlg:Close() end end)
+end
+
+---------------------------------------------------------------- Notification centre (history) + wiring
+function Window:OpenNotifications()
+	local lines = {}
+	for i = #Notify.History, math.max(1, #Notify.History - 11), -1 do
+		local h = Notify.History[i]
+		table.insert(lines, ("%s  %s%s"):format(h.Time, h.Title, (h.Content and h.Content ~= "") and ("  —  " .. h.Content) or ""))
+	end
+	self:Dialog({
+		Title = "Notifications", Icon = "bell", Width = 340,
+		Content = #lines > 0 and table.concat(lines, "\n") or "Nothing yet. Notifications you receive will be listed here.",
+		Buttons = { { Title = "Clear all", Variant = "Secondary", Callback = function() Notify.History = {} end }, { Title = "Close", Variant = "Primary" } },
+	})
+end
+
+-- called once by CreateWindow: header buttons + Ctrl+K
+function Window:_InitExtras()
+	local win = self
+	if self.Config.Palette ~= false then
+		self:CreateTopbarButton({ Icon = "command", Tooltip = "Jump to… (Ctrl+K)", Callback = function() win:OpenPalette() end })
+		connect(UIS.InputBegan, function(input, gp)
+			if gp or input.KeyCode ~= Enum.KeyCode.K then return end
+			local ok, ctrl = pcall(function() return UIS:IsKeyDown(Enum.KeyCode.LeftControl) or UIS:IsKeyDown(Enum.KeyCode.RightControl) end)
+			if ok and ctrl and win.State == "Open" then win:OpenPalette() end
+		end)
+	end
+	if self.Config.NotificationCenter ~= false then
+		self:CreateTopbarButton({ Icon = "bell", Tooltip = "Notifications", Callback = function() win:OpenNotifications() end })
+	end
+end
+
+----------------------------------------------------------------------------
 -- 11b. CONFIGS & SETTINGS TAB
 ----------------------------------------------------------------------------
 local function encodeValue(v)
@@ -3930,6 +4349,24 @@ function Library:LoadConfig(name)
 			local ok, err = pcall(el.Set, decodeValue(val))
 			if not ok then warn("[Library] config '" .. flag .. "': " .. tostring(err)) end
 		end
+	end
+	return true
+end
+
+-- Export every flagged value as one JSON string (share it, paste it into ImportConfig on another machine)
+function Library:ExportConfig()
+	local data = {}
+	for flag, el in pairs(Library.Elements) do
+		if not el.Ignore then data[flag] = encodeValue(el.Get()) end
+	end
+	return jsonEncode(data)
+end
+function Library:ImportConfig(json)
+	local data = jsonDecode(json or "")
+	if type(data) ~= "table" then return false end
+	for flag, val in pairs(data) do
+		local el = Library.Elements[flag]
+		if el and not el.Ignore then pcall(el.Set, decodeValue(val)) end
 	end
 	return true
 end
@@ -4038,6 +4475,36 @@ function Window:CreateSettingsTab(o)
 		Name = "Auto-load selected", Description = "Applies it every time the script starts.",
 		Callback = function(v) if selected then Library:SetAutoload(v and selected or nil) end end,
 	})
+
+	cc:AddButton({
+		Buttons = {
+			{ Name = "Export to clipboard", Icon = "upload", Callback = function()
+				if setclipboard then pcall(setclipboard, Library:ExportConfig() or "") end
+				Library:Notify({ Title = "Exported", Content = "Config copied as text — paste it anywhere.", Type = "Success", Duration = 2.5 })
+			end },
+			{ Name = "Import from text", Icon = "download", Callback = function()
+				win:Prompt({ Title = "Import config", Content = "Paste the exported config text.", Placeholder = "{…}", Multiline = true, Confirm = "Import" }, function(text)
+					Library:Notify({ Title = Library:ImportConfig(text) and "Imported" or "Invalid config", Type = Library:ImportConfig(text) and "Success" or "Error", Duration = 2.5 })
+				end)
+			end },
+		},
+	})
+
+	local te = tab:CreateSection({ Title = "Theme editor", Subtitle = "Edit colours live — copy and share your theme", Collapsible = true, Open = false })
+	local tc = te:AddCard({ Title = "Colours" })
+	for _, tk in ipairs({ "Accent", "Window", "Card", "Text" }) do
+		tc:AddColorPicker({ Name = tk, Default = Theme.Current[tk], Callback = function(c) Theme.SetToken(tk, c) end })
+	end
+	local ts = te:AddCard({ Title = "Share" })
+	ts:AddButton({ Name = "Copy theme", Icon = "copy", Callback = function()
+		if setclipboard then pcall(setclipboard, Theme.Export() or "") end
+		Library:Notify({ Title = "Copied", Content = "Theme copied as text.", Type = "Success", Duration = 2 })
+	end })
+	ts:AddButton({ Name = "Import theme", Icon = "download", Callback = function()
+		win:Prompt({ Title = "Import theme", Content = "Paste a copied theme.", Placeholder = "{…}", Multiline = true, Confirm = "Import" }, function(text)
+			Library:Notify({ Title = Theme.Import(text, "Imported") and "Theme imported" or "Invalid theme", Type = "Info", Duration = 2.5 })
+		end)
+	end })
 
 	local ab = tab:CreateSection({ Title = "About" })
 	local ac = ab:AddCard({ Wide = true })
@@ -4178,6 +4645,7 @@ function Library:CreateWindow(cfg)
 		SetAutoload = function(_, n) return Library:SetAutoload(n) end,
 	}
 	table.insert(Library.Windows, win)
+	win:_InitExtras()
 	if cfg.AutoLaunch ~= false then
 		task.defer(function()
 			if not win._launched and not win._dead then win:Launch() end
